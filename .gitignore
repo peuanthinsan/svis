@@ -9,6 +9,7 @@ public/dashboard/
 # Expo
 .expo/
 dist/
+/host/routes.generated.cjs
 web-build/
 expo-env.d.ts
 
