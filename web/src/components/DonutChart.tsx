@@ -18,22 +18,19 @@ export function DonutChart({ segments, pending, total, centerChecked, size = 132
   const checked = centerChecked ?? (total - pending);
   const pct = total > 0 ? Math.round((checked / total) * 100) : 0;
 
-  // Build arc list: type-coloured slices then gray pending slice.
+  // Paint only completed slices; the base ring supplies the pending portion.
   const arcs: Array<{ length: number; color: string }> = [];
   for (const seg of segments) {
     if (seg.value > 0 && total > 0) {
       arcs.push({ length: (seg.value / total) * circumference, color: seg.color });
     }
   }
-  if (pending > 0 && total > 0) {
-    arcs.push({ length: (pending / total) * circumference, color: 'var(--border)' });
-  }
 
   let cumOffset = 0;
 
   return (
     <svg width={size} height={size} aria-hidden>
-      {/* Base ring — shown when everything is pending */}
+      {/* Base ring — remains visible wherever no completed slice is drawn. */}
       <circle cx={center} cy={center} r={radius} stroke="var(--border)" strokeWidth={strokeWidth} fill="none" />
       {arcs.map((arc, i) => {
         const offset = cumOffset;
@@ -47,10 +44,10 @@ export function DonutChart({ segments, pending, total, centerChecked, size = 132
             stroke={arc.color}
             strokeWidth={strokeWidth}
             fill="none"
-            // strokeDashoffset (positive) advances the start clockwise by `offset` units.
+            // A negative dash offset moves the start clockwise after earlier slices.
             // rotate(-90) moves the zero-point from 3 o'clock to 12 o'clock.
             strokeDasharray={`${arc.length} ${circumference - arc.length}`}
-            strokeDashoffset={offset}
+            strokeDashoffset={-offset}
             transform={`rotate(-90 ${center} ${center})`}
           />
         );
