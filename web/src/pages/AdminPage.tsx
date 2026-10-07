@@ -40,42 +40,47 @@ export function AdminPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [tab, setTab] = useState<AdminTab>(savedAdminTab);
+  const isAdmin = user?.role === 'admin';
+  const activeTab = isAdmin ? tab : 'maintenance';
+  const visibleTabs = isAdmin ? TABS : TABS.filter((item) => item.id === 'maintenance');
 
   useEffect(() => {
-    try { localStorage.setItem(ADMIN_TAB_STORAGE_KEY, tab); } catch { /* storage may be unavailable */ }
-  }, [tab]);
+    if (isAdmin) {
+      try { localStorage.setItem(ADMIN_TAB_STORAGE_KEY, tab); } catch { /* storage may be unavailable */ }
+    }
+  }, [tab, isAdmin]);
 
   useEffect(() => {
-    if (user && user.role !== 'admin') navigate('/', { replace: true });
+    if (user && user.role !== 'admin' && user.role !== 'supervisor') navigate('/', { replace: true });
   }, [user, navigate]);
 
-  if (!user || user.role !== 'admin') return null;
+  if (!user || (user.role !== 'admin' && user.role !== 'supervisor')) return null;
 
   return (
     <div className="stack">
       <div className="panel admin-tabs">
         <div className="admin-tabs__list" aria-label={t('admin')}>
-          {TABS.map((item) => (
+          {visibleTabs.map((item) => (
             <button
               key={item.id}
               type="button"
-              aria-pressed={tab === item.id}
+              aria-pressed={activeTab === item.id}
               onClick={() => setTab(item.id)}
-              className={`admin-tabs__button${tab === item.id ? ' admin-tabs__button--active' : ''}`}
+              className={`admin-tabs__button${activeTab === item.id ? ' admin-tabs__button--active' : ''}`}
             >
               {t(item.key)}
             </button>
           ))}
         </div>
       </div>
-      {tab === 'settings' && <SettingsTab />}
-      {tab === 'users' && <UsersTab />}
-      {tab === 'vehicles' && <VehiclesTab />}
-      {tab === 'fleets' && <FleetsTab />}
-      {tab === 'analytics' && <AnalyticsTab />}
-      {tab === 'checklist' && <ChecklistTab />}
-      {tab === 'issues' && <IssuesMgmtTab />}
-      {tab === 'maintenance' && <MaintenanceTab />}
+      {activeTab === 'settings' && <SettingsTab />}
+      {activeTab === 'users' && <UsersTab />}
+      {activeTab === 'vehicles' && <VehiclesTab />}
+      {activeTab === 'fleets' && <FleetsTab />}
+      {activeTab === 'analytics' && <AnalyticsTab />}
+      {activeTab === 'checklist' && <ChecklistTab />}
+      {activeTab === 'issues' && <IssuesMgmtTab />}
+      {activeTab === 'maintenance' && <MaintenanceTab />}
     </div>
   );
 }

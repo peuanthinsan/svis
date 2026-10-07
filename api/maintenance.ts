@@ -10,7 +10,7 @@ import { getTodayThai } from '../lib/thai-date';
  *  - battery replacement every 18 months
  * The dashboard shows vehicles estimated to hit a threshold within the next 30 days.
  * Mileage projections come from inspection_logs.mileage (odometer entered on every
- * inspection); admins maintain the replacement baselines in vehicle_maintenance.
+ * inspection); admins and fleet supervisors maintain the replacement baselines.
  */
 
 const SERVICE_INTERVAL_KM = 10_000;
@@ -205,7 +205,12 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
 }
 
 async function handlePut(req: VercelRequest, res: VercelResponse, user: AuthUser) {
-  if (user.role !== 'admin') return res.status(403).json({ error: 'Admin only' });
+  if (user.role !== 'admin' && user.role !== 'supervisor') {
+    return res.status(403).json({ error: 'Admin or supervisor access required' });
+  }
+  if (user.role === 'supervisor' && !user.fleetId) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
 
   const {
     vehicleId, region,
@@ -222,35 +227,50 @@ async function handlePut(req: VercelRequest, res: VercelResponse, user: AuthUser
 
   const asDate = (v: unknown) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : null);
   const asKm = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : null);
+  const writeFleet = user.role === 'admin' ? null : user.fleetId;
+  const lostAccess = () => res.status(user.role === 'admin' ? 404 : 403).json({ error: 'Vehicle no longer accessible' });
 
   const sql = neon(process.env.DATABASE_URL!);
   try {
     const [vehicle] = await sql`
-      SELECT id FROM vehicle_master
+      SELECT id, fleet_id FROM vehicle_master
       WHERE id = ${vehicleId} AND company_id = ${user.companyId}
     `;
     if (!vehicle) return res.status(404).json({ error: 'Vehicle not found' });
+    if (user.role === 'supervisor' && vehicle.fleet_id !== user.fleetId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
 
     if (region !== undefined) {
-      await sql`
+      const [updated] = await sql`
         UPDATE vehicle_master SET region = ${region}
         WHERE id = ${vehicleId} AND company_id = ${user.companyId}
+          AND (${writeFleet}::text IS NULL OR fleet_id = ${writeFleet})
+        RETURNING id
       `;
+      if (!updated) return lostAccess();
     }
     if (taxExpiryDate !== undefined) {
-      await sql`
+      const [updated] = await sql`
         UPDATE vehicle_master SET tax_expiry_date = ${asDate(taxExpiryDate)}
         WHERE id = ${vehicleId} AND company_id = ${user.companyId}
+          AND (${writeFleet}::text IS NULL OR fleet_id = ${writeFleet})
+        RETURNING id
       `;
+      if (!updated) return lostAccess();
     }
-    await sql`
-      INSERT INTO vehicle_maintenance (
+    const [saved] = await sql`
+      INSERT INTO vehicle_maintenance AS existing (
         vehicle_id, company_id, last_service_date, last_service_mileage,
         last_tire_change_date, last_tire_change_mileage, last_battery_change_date, updated_at
-      ) VALUES (
+      )
+      SELECT
         ${vehicleId}, ${user.companyId}, ${asDate(lastServiceDate)}, ${asKm(lastServiceMileage)},
         ${asDate(lastTireChangeDate)}, ${asKm(lastTireChangeMileage)}, ${asDate(lastBatteryChangeDate)}, NOW()
-      )
+      FROM vehicle_master v
+      WHERE v.id = ${vehicleId} AND v.company_id = ${user.companyId}
+        AND (${writeFleet}::text IS NULL OR v.fleet_id = ${writeFleet})
+      FOR UPDATE OF v
       ON CONFLICT (vehicle_id) DO UPDATE SET
         last_service_date = EXCLUDED.last_service_date,
         last_service_mileage = EXCLUDED.last_service_mileage,
@@ -258,7 +278,10 @@ async function handlePut(req: VercelRequest, res: VercelResponse, user: AuthUser
         last_tire_change_mileage = EXCLUDED.last_tire_change_mileage,
         last_battery_change_date = EXCLUDED.last_battery_change_date,
         updated_at = NOW()
+      WHERE existing.company_id = EXCLUDED.company_id
+      RETURNING vehicle_id
     `;
+    if (!saved) return lostAccess();
     res.status(200).json({ ok: true });
   } catch (error: any) {
     console.error('[maintenance]', error.message);
