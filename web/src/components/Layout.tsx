@@ -96,7 +96,7 @@ export function Layout() {
               {t('adminChecklist')}
             </NavLink>
           )}
-          {user?.role === 'admin' && (
+          {(user?.role === 'admin' || user?.role === 'supervisor') && (
             <NavLink to="/admin" className={({ isActive }) => (isActive ? 'tabs__link tabs__link--active' : 'tabs__link')}>
               <NavIcon name="admin" />
               {t('admin')}

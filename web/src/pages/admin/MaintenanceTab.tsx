@@ -3,6 +3,7 @@ import { downloadExport, fetchMaintenance, importMaintenance, saveMaintenance, M
 import { t } from '../../i18n';
 import { formatDateThai } from '../../lib/format-date';
 import { parseMaintenanceImportFile } from '../../maintenance-import';
+import { useAuth } from '../../AuthContext';
 
 type FormState = {
   region: 'metro' | 'provincial';
@@ -109,6 +110,8 @@ function allSearchableValues(v: MaintenanceVehicle) {
 }
 
 export function MaintenanceTab() {
+  const { user } = useAuth();
+  const canTransfer = user?.role === 'admin';
   const [vehicles, setVehicles] = useState<MaintenanceVehicle[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<string | null>(null);
@@ -258,15 +261,17 @@ export function MaintenanceTab() {
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           <input type="search" placeholder={`${t('search')} ${t('allParameters')}`} value={search} onChange={(e) => setSearch(e.target.value)} style={{ ...inputStyle, width: 250 }} />
-          <input ref={importInputRef} type="file" accept=".csv,.xlsx" hidden onChange={(e) => void handleMaintenanceImport(e.target.files?.[0])} />
-          <button type="button" className="btn btn--secondary" onClick={() => importInputRef.current?.click()} disabled={transferBusy}>{transferBusy ? '…' : t('importFile')}</button>
-          <button type="button" className="btn btn--secondary" onClick={() => void exportMaintenance()} disabled={transferBusy}>{transferBusy ? '…' : t('export')}</button>
+          {canTransfer && <>
+            <input ref={importInputRef} type="file" accept=".csv,.xlsx" hidden onChange={(e) => void handleMaintenanceImport(e.target.files?.[0])} />
+            <button type="button" className="btn btn--secondary" onClick={() => importInputRef.current?.click()} disabled={transferBusy}>{transferBusy ? '…' : t('importFile')}</button>
+            <button type="button" className="btn btn--secondary" onClick={() => void exportMaintenance()} disabled={transferBusy}>{transferBusy ? '…' : t('export')}</button>
+          </>}
         </div>
       </div>
-      <details style={{ padding: '0 20px 12px', fontSize: 12 }}>
+      {canTransfer && <details style={{ padding: '0 20px 12px', fontSize: 12 }}>
         <summary style={{ cursor: 'pointer', fontWeight: 600 }}>{t('supportedImportColumns')} / {t('supportedExportColumns')}</summary>
         <span className="muted">{t('required')}: <strong>Plate Number</strong> or <strong>Vehicle ID</strong>. {t('optional')}: <strong>Region</strong>, <strong>Last Service Date</strong>, <strong>Last Service Mileage</strong>, <strong>Last Tire Change Date</strong>, <strong>Last Tire Change Mileage</strong>, <strong>Last Battery Change Date</strong>, <strong>Tax Expiry Date</strong>. {t('exportColumns')}: <strong>Vehicle ID</strong>, <strong>Plate Number</strong>, <strong>Fleet</strong>, <strong>Vehicle Type</strong>, <strong>Region</strong>, <strong>Last Service Date</strong>, <strong>Last Service Mileage</strong>, <strong>Last Tire Change Date</strong>, <strong>Last Tire Change Mileage</strong>, <strong>Last Battery Change Date</strong>, <strong>Tax Expiry Date</strong>.</span>
-      </details>
+      </details>}
       <div className="maintenance-filter-bar">
         <select value={regionFilter} onChange={(e) => setRegionFilter(e.target.value)} style={inputStyle} aria-label={t('region')}>
           <option value="all">{t('all')} {t('region')}</option><option value="metro">{t('regionMetro')}</option><option value="provincial">{t('regionProvincial')}</option>
