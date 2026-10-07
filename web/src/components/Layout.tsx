@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
+import { Navigate, NavLink, Outlet } from 'react-router-dom';
 import { brand } from '../branding';
 import { useAuth } from '../AuthContext';
 import { getLang, setLang, t } from '../i18n';
@@ -25,8 +25,10 @@ function NavIcon({ name }: { name: NavIconName }) {
 }
 
 export function Layout() {
-  const { user, signOut } = useAuth();
+  const { user, signOut, isDashboardUser } = useAuth();
   const lang = getLang();
+
+  if (!user || !isDashboardUser) return <Navigate to="/login" replace />;
 
   return (
     <div className="app-shell">
