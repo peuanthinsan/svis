@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
+const { compilerCache } = require('./build-cache.cjs');
 
 function publicBuildSettings(filename) {
   const settings = JSON.parse(fs.readFileSync(filename, 'utf8').replace(/^\uFEFF/, ''));
@@ -97,19 +98,32 @@ function build(configFile, output, options = {}) {
   // All validation above precedes subprocesses and filesystem writes.
   const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'songdee-build-'));
   const env = buildEnvironment(inherited, publicSettings, scratch);
+  const cache = compilerCache({ root, destination, app, publicSettings, environment: inherited,
+    cacheDirectory: options.cacheDirectory });
   function node(args, cwd = root, variables = env) {
+    const started = Date.now();
     const result = run(executable, args, { cwd, env: variables, stdio: 'inherit', windowsHide: true });
+    console.log('Build command ' + path.basename(args[0]) + ' completed in ' + ((Date.now() - started) / 1000).toFixed(1) + 's');
     if (result.error || result.status !== 0) throw new Error('Build command failed; exit code ' + result.status);
   }
   function install(cwd) {
-    node([npm, 'ci', '--include=dev', '--no-audit', '--no-fund'], cwd, { ...env, NODE_ENV: 'development' });
+    node([npm, 'ci', '--include=dev', '--prefer-offline', '--no-audit', '--no-fund'], cwd, { ...env, NODE_ENV: 'development' });
+  }
+  function nextBuild(cwd) {
+    const restored = cache.restore();
+    const args = [path.join(cwd, 'node_modules/next/dist/bin/next'), 'build'];
+    try { node(args, cwd); }
+    catch (error) {
+      if (!restored || !cache.discard()) throw error;
+      node(args, cwd);
+    }
   }
   function copy(from, to) { fs.cpSync(from, to, { recursive: true, errorOnExist: true }); }
   try {
     if (app === 'dashboard') {
       install(root);
       node([path.join(root, 'node_modules/vitest/vitest.mjs'), 'run']);
-      node([path.join(root, 'node_modules/next/dist/bin/next'), 'build']);
+      nextBuild(root);
       copy(path.join(root, '.next/standalone'), destination);
       if (fs.existsSync(path.join(root, 'public'))) copy(path.join(root, 'public'), path.join(destination, 'public'));
       copy(path.join(root, '.next/static'), path.join(destination, '.next/static'));
@@ -118,7 +132,7 @@ function build(configFile, output, options = {}) {
       install(web);
       node(['--experimental-vm-modules', '--test', 'tests/windows-hosting.test.mjs',
         'tests/admin-auth.test.ts', 'tests/database-schema.test.ts', 'tests/production-api-boundary.test.ts']);
-      node([path.join(web, 'node_modules/next/dist/bin/next'), 'build'], web);
+      nextBuild(web);
       copy(path.join(web, '.next/standalone'), destination);
       if (fs.existsSync(path.join(web, 'public'))) copy(path.join(web, 'public'), path.join(destination, 'web/public'));
       copy(path.join(web, '.next/static'), path.join(destination, 'web/.next/static'));
@@ -132,11 +146,12 @@ function build(configFile, output, options = {}) {
       for (const dir of ['dist', 'public']) copy(path.join(root, dir), path.join(destination, dir));
       // Use the repository lockfile for reproducible runtime dependency installation.
       for (const name of ['package.json', 'package-lock.json']) copy(path.join(root, name), path.join(destination, name));
-      node([npm, 'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], destination);
+      node([npm, 'ci', '--omit=dev', '--ignore-scripts', '--prefer-offline', '--no-audit', '--no-fund'], destination);
     }
     fs.mkdirSync(path.join(destination, 'hosting'), { recursive: true });
     for (const name of ['launch.cjs', 'app.json']) copy(path.join(root, 'hosting', name), path.join(destination, 'hosting', name));
     console.log('Release packaged for ' + app);
+    cache.publish();
   } finally {
     fs.rmSync(scratch, { recursive: true, force: true });
   }

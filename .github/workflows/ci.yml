@@ -27,13 +27,15 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             web/package-lock.json
+      - name: Hosting cache regression tests
+        run: node --test hosting/helpers.node-test.cjs hosting/cache.node-test.cjs
       - name: Install app dependencies
-        run: npm ci
+        run: npm ci --prefer-offline
       - name: Typecheck app
         run: npm run typecheck
       - name: Unit tests
         run: npm test
       - name: Install dashboard dependencies
-        run: npm ci --prefix web
+        run: npm ci --prefer-offline --prefix web
       - name: Build dashboard
         run: npm run build --prefix web

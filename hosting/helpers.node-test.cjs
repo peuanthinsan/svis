@@ -22,7 +22,7 @@ function fixture(t, app = 'dashboard') {
   const config = write('public.json', '{}');
   const executable = write('node-install/node');
   write('node-install/node_modules/npm/bin/npm-cli.js');
-  return { base, root, write, config, executable, output: path.join(base, 'release') };
+  return { base, root, write, config, executable, cacheDirectory: path.join(base, 'compiler-cache'), output: path.join(base, 'release') };
 }
 
 for (const invalid of ['null', '[]', '"text"', '4', '{"DATABASE_URL":"dummy"}',
@@ -34,7 +34,7 @@ for (const invalid of ['null', '[]', '"text"', '4', '{"DATABASE_URL":"dummy"}',
     const writes = t.mock.method(fs, 'mkdtempSync', () => assert.fail('unexpected write'));
     let spawns = 0;
     assert.throws(() => build(f.config, f.output, {
-      root: f.root, execPath: f.executable, spawnSync: () => { spawns++; },
+      root: f.root, cacheDirectory: f.cacheDirectory, execPath: f.executable, spawnSync: () => { spawns++; },
     }), /Build setting/);
     assert.equal(spawns, 0);
     assert.equal(writes.mock.callCount(), 0);
@@ -48,7 +48,7 @@ for (const filename of ['.env', '.env.production.local', 'web/.env', 'web/.env.p
     f.write('source/' + filename, 'DUMMY_SECRET=not-a-real-secret');
     const writes = t.mock.method(fs, 'mkdtempSync', () => assert.fail('unexpected write'));
     assert.throws(() => build(f.config, f.output, {
-      root: f.root, execPath: f.executable, spawnSync: () => assert.fail('unexpected subprocess'),
+      root: f.root, cacheDirectory: f.cacheDirectory, execPath: f.executable, spawnSync: () => assert.fail('unexpected subprocess'),
     }), /without .env files/);
     assert.equal(writes.mock.callCount(), 0);
     assert.equal(fs.existsSync(f.output), false);
@@ -60,7 +60,7 @@ test('output inside source through a symlink is rejected before writes', t => {
   fs.symlinkSync(f.root, path.join(f.base, 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
   const writes = t.mock.method(fs, 'mkdtempSync', () => assert.fail('unexpected write'));
   assert.throws(() => build(f.config, path.join(f.base, 'alias/release'), {
-    root: f.root, execPath: f.executable, spawnSync: () => assert.fail('unexpected subprocess'),
+    root: f.root, cacheDirectory: f.cacheDirectory, execPath: f.executable, spawnSync: () => assert.fail('unexpected subprocess'),
   }), /outside the source/);
   assert.equal(writes.mock.callCount(), 0);
 });
@@ -88,7 +88,7 @@ for (const app of ['dashboard', 'ops', 'svis']) {
       NEXT_PUBLIC_INHERITED: 'must-not-leak', npm_config_userconfig: '/private/config',
     };
     const calls = [];
-    build(f.config, f.output, { root: f.root, execPath: f.executable, environment: inherited,
+    build(f.config, f.output, { root: f.root, cacheDirectory: f.cacheDirectory, execPath: f.executable, environment: inherited,
       spawnSync: (command, args, options) => { calls.push({ command, args, ...options }); return { status: 0 }; },
     });
     assert.equal(calls.length, { dashboard: 3, ops: 3, svis: 6 }[app]);
@@ -107,7 +107,7 @@ for (const app of ['dashboard', 'ops', 'svis']) {
       assert.equal(fs.existsSync(path.dirname(call.env.NPM_CONFIG_USERCONFIG)), false, 'temporary npm config removed');
     }
     assert.equal(calls[0].env.NODE_ENV, 'development');
-    assert.deepEqual(calls[0].args.slice(1), ['ci', '--include=dev', '--no-audit', '--no-fund']);
+    assert.deepEqual(calls[0].args.slice(1), ['ci', '--include=dev', '--prefer-offline', '--no-audit', '--no-fund']);
     if (app === 'ops') {
       assert.equal(calls[1].cwd, f.root);
       assert.deepEqual(calls[1].args, ['--experimental-vm-modules', '--test', 'tests/windows-hosting.test.mjs',
@@ -124,7 +124,7 @@ for (const app of ['dashboard', 'ops', 'svis']) {
       const runtime = calls.at(-1);
       assert.equal(runtime.cwd, f.output);
       assert.equal(runtime.env.NODE_ENV, 'production');
-      assert.deepEqual(runtime.args.slice(1), ['ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund']);
+      assert.deepEqual(runtime.args.slice(1), ['ci', '--omit=dev', '--ignore-scripts', '--prefer-offline', '--no-audit', '--no-fund']);
       assert.equal(fs.readFileSync(path.join(f.output, 'package-lock.json'), 'utf8'), '{"lockfileVersion":3}');
     } else {
       assert.equal(fs.existsSync(path.join(f.output, app === 'ops' ? 'web/.next/static/chunk.js' : '.next/static/chunk.js')), true);
@@ -185,7 +185,7 @@ for (const app of ['ops', 'svis']) {
     const f = fixture(t, app);
     const calls = [];
     assert.throws(() => build(f.config, f.output, {
-      root: f.root, execPath: f.executable, environment: {},
+      root: f.root, cacheDirectory: f.cacheDirectory, execPath: f.executable, environment: {},
       spawnSync: (command, args) => {
         calls.push(args);
         return { status: args.includes('--test') ? 1 : 0 };
