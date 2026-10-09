@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Navigate, useSearchParams } from 'react-router-dom';
 import { fetchHistory, fetchInspectionDetail, type HistoryData, type InspectionDetail } from '../api';
 import { useAuth } from '../AuthContext';
@@ -8,9 +8,10 @@ import { formatDateThai } from '../lib/format-date';
 import { useDebounce } from '../useDebounce';
 import { DateRangePicker } from '../components/DateRangePicker';
 
-type Range = 'today' | 'week' | 'month' | 'custom';
+type Range = 'all' | 'today' | 'week' | 'month' | 'custom';
 
 function getDateRange(range: Range, customStart = '', customEnd = '') {
+  if (range === 'all') return { startDate: '', endDate: '' };
   const now = new Date(new Date().getTime() + 7 * 60 * 60 * 1000);
   const endDate = now.toISOString().split('T')[0];
   if (range === 'today') return { startDate: endDate, endDate };
@@ -67,9 +68,12 @@ function InspectionModal({ inspection, onClose }: { inspection: InspectionDetail
               {t('fleet')}: {inspection.fleet_id || '-'}
               {' • '}{t('vehicleType')}: {inspection.vehicle_type || '-'}
               {' • '}{t('frequency')}: {inspection.frequency || '-'}
+              {inspection.vehicle_usable === false && <> • {t('outOfService')}</>}
             </div>
           </div>
-          <span className="badge badge--open">{t('failed')}</span>
+          <span className={inspection.overall_status === 'fail' ? 'badge badge--open' : 'badge badge--pass'}>
+            {t(inspection.overall_status === 'fail' ? 'failed' : 'passed')}
+          </span>
         </div>
 
         {globalPhotos.length > 0 && (
@@ -132,9 +136,11 @@ function InspectionModal({ inspection, onClose }: { inspection: InspectionDetail
 export function HistoryPage() {
   const { user, isDashboardUser } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const outOfService = searchParams.get('filter') === 'out_of_service';
   const requestedRange = searchParams.get('range');
-  const initialRange: Range = requestedRange === 'week' || requestedRange === 'month' ? requestedRange : 'today';
-  const [range, setRange] = useState<Range>(initialRange);
+  const range: Range = requestedRange === 'all' && outOfService ? 'all'
+    : requestedRange === 'week' || requestedRange === 'month' || requestedRange === 'custom' ? requestedRange
+    : 'today';
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [history, setHistory] = useState<HistoryData | null>(null);
@@ -144,12 +150,18 @@ export function HistoryPage() {
   const debouncedSearch = useDebounce(search, 300);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const queryGeneration = useRef(0);
   const HISTORY_PAGE_SIZE = 50;
 
-  const fleetScope = user?.role === 'admin' ? undefined : user?.fleetId;
+  const fleetScope = user?.role === 'admin' ? searchParams.get('fleetId') || undefined : user?.fleetId;
 
   useEffect(() => {
     let cancelled = false;
+    queryGeneration.current++;
+    setHistory(null);
+    setSelected(null);
+    setHasMore(false);
+    setLoadingMore(false);
     (async () => {
       if (range === 'custom' && (!customStart || !customEnd || customStart > customEnd)) {
         setLoading(false);
@@ -159,6 +171,7 @@ export function HistoryPage() {
       try {
         const { startDate, endDate } = getDateRange(range, customStart, customEnd);
         const data = await fetchHistory(startDate, endDate, fleetScope, {
+          outOfService,
           search: debouncedSearch.trim(),
           limit: HISTORY_PAGE_SIZE,
           offset: 0,
@@ -174,18 +187,21 @@ export function HistoryPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [range, customStart, customEnd, fleetScope, debouncedSearch]);
+  }, [range, customStart, customEnd, fleetScope, debouncedSearch, outOfService]);
 
   async function loadMore() {
     if (!history || loadingMore || !hasMore) return;
     setLoadingMore(true);
+    const generation = queryGeneration.current;
     try {
       const { startDate, endDate } = getDateRange(range, customStart, customEnd);
       const data = await fetchHistory(startDate, endDate, fleetScope, {
+        outOfService,
         search: debouncedSearch.trim(),
         limit: HISTORY_PAGE_SIZE,
         offset: history.inspections.length,
       });
+      if (generation !== queryGeneration.current) return;
       setHistory((current) => current ? {
         ...current,
         inspections: [...current.inspections, ...data.inspections],
@@ -194,13 +210,16 @@ export function HistoryPage() {
     } catch {
       // Keep the records already loaded; the next click can retry.
     } finally {
-      setLoadingMore(false);
+      if (generation === queryGeneration.current) setLoadingMore(false);
     }
   }
 
   function selectRange(nextRange: Range) {
-    setRange(nextRange);
-    setSearchParams({ range: nextRange });
+    setSearchParams((current) => {
+      const next = new URLSearchParams(current);
+      next.set('range', nextRange);
+      return next;
+    });
   }
 
   if (!user) return <Navigate to="/login" replace />;
@@ -209,14 +228,25 @@ export function HistoryPage() {
   // The API returns both passed and failed inspections. The log should show
   // both; the summary cards already provide the status breakdown.
   const inspections = history?.inspections || [];
+  const emptyMessage = debouncedSearch.trim() ? 'noResults'
+    : outOfService ? (range === 'all' ? 'noOutOfServiceVehicles' : 'noOutOfServiceInPeriod')
+    : 'noInspections';
 
   return (
     <div className="stack">
       <div className="page-header">
-        <h1>{t('history')}</h1>
+        <div>
+          <h1>{t(outOfService ? 'outOfService' : 'history')}</h1>
+          {outOfService && <p className="muted">{t('outOfServiceHistoryDescription')}</p>}
+        </div>
       </div>
 
       <div className="chip-row">
+        {outOfService && (
+          <button type="button" className={`chip${range === 'all' ? ' chip--active' : ''}`} onClick={() => selectRange('all')}>
+            {t('allTime')}
+          </button>
+        )}
         {(['today', 'week', 'month'] as Range[]).map((key) => (
           <button
             key={key}
@@ -268,7 +298,7 @@ export function HistoryPage() {
             <h2>{t('history')}</h2>
             <div className="panel panel--flush">
               {inspections.length === 0 ? (
-                <div className="table-empty">{t('noInspections')}</div>
+                <div className="table-empty">{t(emptyMessage)}</div>
               ) : (
                 inspections.map((ins) => {
                   const photoCount = (ins.photo_urls?.length ?? 0) + (ins.odometer_photo_url ? 1 : 0);
@@ -285,6 +315,7 @@ export function HistoryPage() {
                           {t('fleet')}: {ins.fleet_id || '-'}
                           {' • '}{t('vehicleType')}: {ins.vehicle_type || '-'}
                           {' • '}{t('frequency')}: {ins.frequency || '-'}
+                          {ins.vehicle_usable === false && <> • {t('outOfService')}</>}
                         </div>
                         <div className="muted">
                           {t('date')}: {formatDateThai(ins.inspection_date)}
