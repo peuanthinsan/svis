@@ -220,8 +220,11 @@ export function fetchDashboard(fleetId?: string, signal?: AbortSignal) {
   return apiFetch<DashboardData>(`/api/dashboard${qs}`, { signal });
 }
 
-export function fetchHistory(startDate: string, endDate: string, fleetId?: string, options?: { search?: string; limit?: number; offset?: number }) {
-  const params = new URLSearchParams({ startDate, endDate });
+export function fetchHistory(startDate: string, endDate: string, fleetId?: string, options?: { search?: string; limit?: number; offset?: number; outOfService?: boolean }) {
+  const params = new URLSearchParams();
+  if (startDate) params.set('startDate', startDate);
+  if (endDate) params.set('endDate', endDate);
+  if (options?.outOfService) params.set('outOfService', 'true');
   if (fleetId) params.set('fleetId', fleetId);
   if (options?.search) params.set('search', options.search);
   if (options?.limit !== undefined) params.set('limit', String(options.limit));

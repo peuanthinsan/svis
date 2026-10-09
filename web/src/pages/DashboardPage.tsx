@@ -527,6 +527,11 @@ export function DashboardPage() {
   if (!data) return <div className="panel centered">{t('noData')}</div>;
 
   const defects = data.withDefect.vehicles;
+  const outOfServiceHistory = (range: 'all' | 'today') => {
+    const params = new URLSearchParams({ filter: 'out_of_service', range });
+    if (data.fleetId) params.set('fleetId', data.fleetId);
+    return `/history?${params}`;
+  };
 
   return (
     <div className="stack">
@@ -574,15 +579,15 @@ export function DashboardPage() {
         <section className="panel attention-card">
           <div className="section-head">
             <h2>{t('outOfService')}</h2>
-            <Link className="section-link" to="/history?range=today">
+            <Link className="section-link" to={outOfServiceHistory('today')}>
               {t('viewTodayHistory')} <span aria-hidden="true">→</span>
             </Link>
           </div>
           <div className="metric-grid">
-            <Link className="metric metric--link" to="/history?range=today">
+            <Link className="metric metric--link" to={outOfServiceHistory('all')}>
               <strong>{data.outOfService.total}</strong><span>{t('metricTotal')}</span>
             </Link>
-            <Link className="metric metric--link" to="/history?range=today">
+            <Link className="metric metric--link" to={outOfServiceHistory('today')}>
               <strong>{data.outOfService.today}</strong><span>{t('today')}</span>
             </Link>
           </div>
