@@ -150,7 +150,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         GROUP BY v.fleet_id
       `,
       // Telematics snapshot (null = sheet not configured; degrade to fleet-size denominators).
-      fetchSheetVehicles(sql, user.companyId).catch((err): SheetVehicle[] | null => {
+      fetchSheetVehicles(sql, user.companyId, { companySlug: user.companySlug }).catch((err): SheetVehicle[] | null => {
         telematicsUnavailable = true;
         console.warn('[dashboard] GPS sheet unavailable:', err.message);
         return null;
