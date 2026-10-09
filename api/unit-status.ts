@@ -44,7 +44,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     // Fetch GPS data and inspection completion (per frequency) in parallel.
     const [sheetVehicles, fleetVehicles, dailyRows, weeklyRows] = await Promise.all([
-      fetchSheetVehicles(sql, user.companyId),
+      fetchSheetVehicles(sql, user.companyId, { companySlug: user.companySlug }),
       // Database fleet membership is authoritative. The sheet's Fleet column may be
       // stale or mislabeled, so it must not decide which vehicles a user can see.
       sql`
