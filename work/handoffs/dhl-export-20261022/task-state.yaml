@@ -1,0 +1,39 @@
+task_id: dhl-export-20261022
+repository: peuanthinsan/svis
+base_sha: 5286f4c47ae83cf30a4fcf9f7b88aa748e7e65ce
+provider: Codex
+model: GPT-6 Astra Pro
+effort: UNKNOWN
+phase: verified_for_user_directed_merge
+writer_lease: released
+implementation_complete: true
+local_verification_complete: true
+git_publication: via_this_pull_request
+publication_authorized: true
+merge_authorized: true
+authorization: User directed "draft pr merge to main" after disclosure that Claude review was unavailable.
+production_database_writes: not_performed
+deployment: not_performed
+review:
+  independent_codex: complete_no_unresolved_blocker
+  required_claude: not_performed_unavailable_disclosed
+  fallback_reason: No callable Claude reviewer or CLI was available; Codex review is additional evidence only.
+verification:
+  automated_tests_passed: 251
+  automated_tests_skipped: 4
+  automated_tests_failed: 0
+  focused_host_tests_passed: 18
+  focused_host_tests_overlap_full_suite: 7
+  isolated_sql_browser_checks_passed: 19
+  backend_typecheck: passed
+  dashboard_build: passed
+  node_host_build: passed_38_routes
+  diff_whitespace_check: passed
+remaining:
+  - Claude review was unavailable; user subsequently directed publication and merge
+  - Production database mutation and manual deployment approvals
+  - Verified custom-host and database deployment target
+  - Actual DHL incident logs and network acceptance
+  - Multi-session PostgreSQL contention acceptance
+  - Async job architecture remains unimplemented
+next_owner: Active root for authorized PR and merge, then approved release operator

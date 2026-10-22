@@ -5,6 +5,7 @@ const {routes}=require('./routes.generated.cjs');
 const {closePools,withRequestTransaction}=require('./pg-neon.cjs');
 const {normalizeProxyHeaders}=require('./proxy-headers.cjs');
 const {blocksWebsite}=require('./host-policy.cjs');
+const {createExportDiagnostics}=require('./export-diagnostics.cjs');
 const publicRoot=path.resolve(process.env.SVIS_PUBLIC_DIR||path.join(__dirname,'../public'));
 const port=Number(process.env.PORT||8081);
 const host=process.env.HOST||'127.0.0.1';
@@ -32,9 +33,9 @@ function queryObject(search){
  return q;
 }
 const server=http.createServer(async(req,res)=>{
- const started=Date.now();let routeName='unmatched';
+ const started=Date.now();let routeName='unmatched';let exportDiagnostics=null;
  active++;
- res.once('close',()=>{console.log(JSON.stringify({event:'request',route:routeName,method:req.method,status:res.statusCode,ms:Date.now()-started}));});
+ res.once('close',()=>{console.log(JSON.stringify({event:'request',route:routeName,method:req.method,status:res.statusCode,ms:Date.now()-started,...exportDiagnostics}));});
  res.status=code=>{res.statusCode=code;return res;};
  res.json=value=>{res.setHeader('Content-Type','application/json; charset=utf-8');res.end(JSON.stringify(value));return res;};
  res.send=value=>{if(typeof value==='object'&&!Buffer.isBuffer(value))return res.json(value);res.end(value);return res;};
@@ -44,6 +45,8 @@ const server=http.createServer(async(req,res)=>{
   let pathname;
   try{pathname=decodeURIComponent(url.pathname);}catch{return res.status(400).json({error:'Invalid path'});}
   if(pathname.includes('\\')||pathname.includes('\0'))return res.status(400).json({error:'Invalid path'});
+  exportDiagnostics=createExportDiagnostics(pathname,req.headers,url.searchParams);
+  if(exportDiagnostics){routeName=pathname.replace(/\/$/,'');res.setHeader('X-Request-ID',exportDiagnostics.requestId);}
   if(draining)return res.status(503).json({error:'Server restarting'});
   if(pathname.startsWith('/api/')){
    normalizeProxyHeaders(req,process.env.SVIS_PROXY_SECRET);

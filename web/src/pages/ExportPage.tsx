@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Navigate } from 'react-router-dom';
-import { downloadExport, fetchDashboard } from '../api';
+import { ApiError, downloadDashboardExport, fetchDashboard } from '../api';
 import { useAuth } from '../AuthContext';
 import { t } from '../i18n';
 
@@ -19,7 +19,8 @@ function getRange(period: Period, start: string, end: string) {
     return { start: localDate(monday), end: localDate(today) };
   }
   if (period === 'month') return { start: localDate(new Date(today.getFullYear(), today.getMonth(), 1)), end: localDate(today) };
-  return start && end ? { start, end } : { error: t('selectDateRange') };
+  if (!start || !end) return { error: t('selectDateRange') };
+  return start <= end ? { start, end } : { error: t('exportInvalidDateRange') };
 }
 
 export function ExportPage() {
@@ -32,6 +33,7 @@ export function ExportPage() {
   const [end, setEnd] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [downloadRequested, setDownloadRequested] = useState(false);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -47,6 +49,7 @@ export function ExportPage() {
   const currentUser = user;
 
   async function exportReport() {
+    setDownloadRequested(false);
     const range = getRange(period, start, end);
     if ('error' in range) { setError(range.error ?? t('selectDateRange')); return; }
     setError('');
@@ -57,8 +60,13 @@ export function ExportPage() {
       if (scope) params.set('fleetId', scope);
       if (range.start) params.set('dateStart', range.start);
       if (range.end) params.set('dateEnd', range.end);
-      await downloadExport(`/api/dashboard/export?${params.toString()}`, `dashboard-${range.end || 'report'}.xlsx`);
-    } catch (err: any) { setError(err.message || t('exportFailed')); }
+      await downloadDashboardExport(params);
+      setDownloadRequested(true);
+    } catch (err: unknown) {
+      if (err instanceof TypeError) setError(t('exportNetworkError'));
+      else if (err instanceof ApiError && err.status === 401) setError(t('exportSessionExpired'));
+      else setError(t('exportFailed'));
+    }
     finally { setBusy(false); }
   }
 
@@ -68,8 +76,9 @@ export function ExportPage() {
       <div className="export-field"><label htmlFor="export-fleet">{t('fleet')}</label><select id="export-fleet" value={fleet} onChange={(event) => setFleet(event.target.value)} disabled={!isAdmin}><option value="">{isAdmin ? t('allFleets') : user.fleetId}</option>{fleets.map((item) => <option key={item} value={item}>{item}</option>)}</select></div>
       <div className="export-field"><span className="export-label">{t('timePeriod')}</span><div className="export-options">{periodOptions.map(([value, label]) => <button type="button" key={value} className={`export-option${period === value ? ' export-option--active' : ''}`} onClick={() => setPeriod(value)}>{label}</button>)}</div></div>
       {period === 'custom' && <div className="export-dates"><label><span>{t('from')}</span><input type="date" value={start} onChange={(event) => setStart(event.target.value)} /></label><label><span>{t('to')}</span><input type="date" min={start || undefined} value={end} onChange={(event) => setEnd(event.target.value)} /></label></div>}
-      {error && <div className="alert alert--error">{error}</div>}
-      <button type="button" className="btn btn--accent export-submit" onClick={() => void exportReport()} disabled={busy}>{busy ? '…' : t('export')}</button>
+      {error && <div className="alert alert--error" role="alert">{error}</div>}
+      {downloadRequested && <p className="muted" role="status">{t('exportDownloadRequested')}</p>}
+      <button type="button" className="btn btn--accent export-submit" onClick={() => void exportReport()} disabled={busy}>{busy ? t('exportPreparing') : t('export')}</button>
     </section>
   </div>;
 }

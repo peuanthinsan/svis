@@ -1,7 +1,9 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
-import { neon } from '@neondatabase/serverless';
+import { neon, type NeonQueryFunction } from '@neondatabase/serverless';
 import ExcelJS from 'exceljs';
-import { verifyAuth } from '../../lib/api-auth';
+import { getJwtSecret, verifyAuth } from '../../lib/api-auth';
+import { ExportRequestError, redeemExportTicket, resolveExportScope, type ExportScope } from '../../lib/export-download-ticket';
+import { logExportFailure, setExportResponseHeaders } from '../../lib/export-http';
 import { brand, toArgb } from '../../branding';
 import { vehicleTypeLabel } from '../../lib/types';
 
@@ -31,26 +33,31 @@ function excelDate(d: string | Date | null | undefined) {
 }
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-
-  const user = await verifyAuth(req);
-  if (!user) return res.status(401).json({ error: 'Unauthorized' });
-
-  const { fleetId, dateStart, dateEnd } = req.query;
-  const sql = neon(process.env.DATABASE_URL!);
-
-  // Non-admins can only export their own fleet
-  let fleetIds: string[] = [];
-  if (user.role !== 'admin' && user.fleetId) {
-    fleetIds = [user.fleetId];
-  } else if (fleetId) {
-    fleetIds = (fleetId as string).split(',').map((s) => s.trim()).filter(Boolean);
+  setExportResponseHeaders(req, res, 'GET');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  if (req.method !== 'GET') {
+    res.setHeader('Allow', 'GET, OPTIONS');
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
+    let scope: ExportScope;
+    let sql: NeonQueryFunction<false, false>;
+    if (Object.prototype.hasOwnProperty.call(req.query, 'downloadTicket')) {
+      sql = neon(process.env.DATABASE_URL!);
+      scope = await redeemExportTicket(sql, req.query.downloadTicket, getJwtSecret());
+    } else {
+      const user = await verifyAuth(req);
+      if (!user) return res.status(401).json({ error: 'Unauthorized' });
+      scope = resolveExportScope(user, req.query);
+      sql = neon(process.env.DATABASE_URL!);
+    }
+    // Ticket requests use only the stored scope: proxy/user query parameters
+    // cannot change the authorized company, fleets or dates after issuance.
+    const { companyId, fleetIds, dateStart, dateEnd } = scope;
     // Build dynamic WHERE for inspection-scoped queries
     const inspectionConditions: string[] = ['il.company_id = $1'];
-    const inspectionParams: string[] = [user.companyId];
+    const inspectionParams: string[] = [companyId];
 
     if (fleetIds.length === 1) {
       inspectionParams.push(fleetIds[0]);
@@ -97,7 +104,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Fleet vehicle totals (scoped to selected fleets if provided)
     const totalsConditions: string[] = ['company_id = $1'];
-    const totalsParams: string[] = [user.companyId];
+    const totalsParams: string[] = [companyId];
     if (fleetIds.length === 1) {
       totalsParams.push(fleetIds[0]);
       totalsConditions.push(`fleet_id = $${totalsParams.length}`);
@@ -577,8 +584,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', String(Buffer.from(buffer).byteLength));
     res.status(200).end(Buffer.from(buffer));
-  } catch (error: any) {
-    console.error('[API] Dashboard export error:', error.message);
+  } catch (error) {
+    if (error instanceof ExportRequestError) {
+      return res.status(error.status).json({ error: error.message });
+    }
+    logExportFailure('dashboard_export_failed', error);
     res.status(500).json({ error: 'Export failed' });
   }
 }

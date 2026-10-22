@@ -482,12 +482,42 @@ export function importMaintenance(rows: Array<{
   });
 }
 
-export function exportDashboardUrl(params: URLSearchParams) {
-  const token = getToken();
-  const qs = params.toString();
-  const url = `/api/dashboard/export${qs ? `?${qs}` : ''}`;
-  if (!token) return url;
-  return `${url}${qs ? '&' : '?'}token=${encodeURIComponent(token)}`;
+export async function downloadDashboardExport(params: URLSearchParams) {
+  const result = await apiFetch<{ downloadUrl: string; expiresAt: string }>(
+    '/api/dashboard/export-ticket',
+    {
+      method: 'POST',
+      body: JSON.stringify({
+        fleetId: params.get('fleetId') || undefined,
+        dateStart: params.get('dateStart') || undefined,
+        dateEnd: params.get('dateEnd') || undefined,
+      }),
+    },
+  );
+
+  // A download ticket authorizes only this report. Never put the login token
+  // in a URL or use fetch/blob for the ticketed file transfer: a corporate
+  // authentication redirect can remove fetch's Authorization header.
+  if (typeof result?.downloadUrl !== 'string') {
+    throw new ApiError('Unable to start the export download', 502);
+  }
+  let url: URL;
+  try {
+    url = new URL(result.downloadUrl, window.location.origin);
+  } catch {
+    throw new ApiError('Unable to start the export download', 502);
+  }
+  if (
+    url.origin !== window.location.origin
+    || url.pathname !== '/api/dashboard/export'
+    || url.username || url.password || url.hash
+    || !url.searchParams.get('downloadTicket')
+    || [...url.searchParams.keys()].some((key) => key !== 'downloadTicket')
+    || url.searchParams.getAll('downloadTicket').length !== 1
+  ) {
+    throw new ApiError('Unable to start the export download', 502);
+  }
+  window.location.assign(`${url.pathname}${url.search}`);
 }
 
 export async function downloadExport(path: string, filename: string) {
