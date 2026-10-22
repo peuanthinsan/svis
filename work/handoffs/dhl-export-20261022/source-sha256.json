@@ -1,0 +1,21 @@
+{
+  "base_sha": "5286f4c47ae83cf30a4fcf9f7b88aa748e7e65ce",
+  "files": {
+    "api/dashboard/export.ts": "1bb862600e468e4389304f620a26ad6e617ecc4917b070eae6946f65e0b40f6e",
+    "api/dashboard/export-ticket.ts": "2a8c34c1645901def806dd416e49187143af01dbccf4aa5f17b13c1d55b0d196",
+    "lib/export-download-ticket.ts": "d6da222fbdce6ff251e63dad4bd52b72de0fe70bdc240419d32e75977d7e18d5",
+    "lib/export-http.ts": "b79b090eab164a9b40c2dc28bf08334e180c1b0d666804bb9ddc8b17c45b55da",
+    "lib/i18n.ts": "9e607414e3d4f98d233067cec3b25e81ab74c2d87e5e2de47b3be3613c821807",
+    "host/server.cjs": "e98d36f3f16fa3503bf3eeea2da3059800d6bff01ee9fbebb53482c14930bbf6",
+    "host/export-diagnostics.cjs": "a882f8ac083dd161463f93970aadd3d3bf77233c76ec6e342e3303db21b6ee7d",
+    "host/export-diagnostics.test.cjs": "330909ea6493d4ee418c669d0b773897177d569f4f874ea01b8dbda854aa1cc6",
+    "web/src/api.ts": "08be61ba54a7567800704c7ea79373a45676e71786e23e58348f41b2fd5bfd5c",
+    "web/src/pages/ExportPage.tsx": "3da97300ac7003265771d1507ae03b5aeda1a9de7ac1f61b73268b53c0ba21b9",
+    "web/src/i18n.ts": "552741e047430b5544cc1f51d02685a0378eb4f3c8b49988e67737ef14f09025",
+    "sql/024-export-download-tickets.sql": "2d3d957086a82e1fe09abb563653578ea6111f1b0f6621b10bcb59cf007d9b01",
+    "tests/dashboard-download.test.mjs": "8c238bf520c89d1cabd450ac3fd2fcc0c61cffb7f20a211372497c5b7443ac79",
+    "tests/export-download-ticket.test.mjs": "47f0e768b9bf1f1ade9990cfc0eaad5fbeb9c0b482430b07466267767118a96d",
+    "tests/export-host-diagnostics.test.mjs": "74e4fa8319cc350d96a5535f1ea2315a45fd750d9fd380c768743d4808280fe2"
+  },
+  "patch_sha256": "74cdbc997186614b8d0c72d5f458861251bd0a57927a338d4f6a0007088ecacc"
+}
