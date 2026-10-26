@@ -30,13 +30,13 @@ export default function ProfileScreen() {
   const [savingPw, setSavingPw] = useState(false);
 
   const displayName = user ? `${user.firstName} ${user.lastName}` : '';
-  const roleLabel = user?.role
+  const roleLabel = user?.role === 'vehicle_owner' ? t('profile.vehicleOwner') : user?.role
     ? user.role.charAt(0).toUpperCase() + user.role.slice(1)
     : '';
   const initials = `${user?.firstName?.[0] ?? ''}${user?.lastName?.[0] ?? ''}`.toUpperCase();
 
   async function handleSaveName() {
-    if (!firstName.trim() || !lastName.trim()) return;
+    if (!firstName.trim() || (user?.role !== 'vehicle_owner' && !lastName.trim())) return;
     setSavingName(true);
     try {
       await updateProfile(firstName.trim(), lastName.trim());

@@ -6,6 +6,7 @@ import { ExportRequestError, redeemExportTicket, resolveExportScope, type Export
 import { logExportFailure, setExportResponseHeaders } from '../../lib/export-http';
 import { brand, toArgb } from '../../branding';
 import { vehicleTypeLabel } from '../../lib/types';
+import { getOwnerVehicleIds } from '../../lib/vehicle-access';
 
 function vehicleLabel(t: string) {
   return vehicleTypeLabel(t);
@@ -51,23 +52,32 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       if (!user) return res.status(401).json({ error: 'Unauthorized' });
       scope = resolveExportScope(user, req.query);
       sql = neon(process.env.DATABASE_URL!);
+      const vehicleIds = await getOwnerVehicleIds(sql, user);
+      if (vehicleIds !== null) scope.vehicleIds = vehicleIds;
     }
     // Ticket requests use only the stored scope: proxy/user query parameters
     // cannot change the authorized company, fleets or dates after issuance.
-    const { companyId, fleetIds, dateStart, dateEnd } = scope;
+    const { companyId, fleetIds, vehicleIds, dateStart, dateEnd } = scope;
+    // Owner filters follow the selected vehicles' current fleets, just like
+    // their dashboard/history. Operational-role reports retain historical fleets.
+    const inspectionFleet = vehicleIds === undefined ? 'il.fleet_id' : 'vm.fleet_id';
     // Build dynamic WHERE for inspection-scoped queries
     const inspectionConditions: string[] = ['il.company_id = $1'];
-    const inspectionParams: string[] = [companyId];
+    const inspectionParams: Array<string | string[]> = [companyId];
+    if (vehicleIds !== undefined) {
+      inspectionParams.push(vehicleIds);
+      inspectionConditions.push(`il.vehicle_id = ANY($${inspectionParams.length}::uuid[])`);
+    }
 
     if (fleetIds.length === 1) {
       inspectionParams.push(fleetIds[0]);
-      inspectionConditions.push(`il.fleet_id = $${inspectionParams.length}`);
+      inspectionConditions.push(`${inspectionFleet} = $${inspectionParams.length}`);
     } else if (fleetIds.length > 1) {
       const placeholders = fleetIds.map((id) => {
         inspectionParams.push(id);
         return `$${inspectionParams.length}`;
       }).join(',');
-      inspectionConditions.push(`il.fleet_id IN (${placeholders})`);
+      inspectionConditions.push(`${inspectionFleet} IN (${placeholders})`);
     }
     if (dateStart) {
       inspectionParams.push(dateStart as string);
@@ -84,15 +94,16 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     // Aggregate fleet-level stats for the period
     const fleetStatsQuery = `
       SELECT
-        il.fleet_id,
+        ${inspectionFleet} AS fleet_id,
         COUNT(DISTINCT il.vehicle_id)::int AS vehicles_checked,
         COUNT(*)::int                     AS inspections,
         COUNT(*) FILTER (WHERE il.overall_status = 'pass')::int AS passed,
         COUNT(*) FILTER (WHERE il.overall_status = 'fail')::int AS failed
       FROM inspection_logs il
+      JOIN vehicle_master vm ON vm.id = il.vehicle_id AND vm.company_id = il.company_id
       ${inspectionWhere}
-      GROUP BY il.fleet_id
-      ORDER BY il.fleet_id
+      GROUP BY ${inspectionFleet}
+      ORDER BY ${inspectionFleet}
     `;
     const fleetStats = await sql.query(fleetStatsQuery, inspectionParams) as Array<{
       fleet_id: string;
@@ -104,7 +115,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Fleet vehicle totals (scoped to selected fleets if provided)
     const totalsConditions: string[] = ['company_id = $1'];
-    const totalsParams: string[] = [companyId];
+    const totalsParams: Array<string | string[]> = [companyId];
+    if (vehicleIds !== undefined) {
+      totalsParams.push(vehicleIds);
+      totalsConditions.push(`id = ANY($${totalsParams.length}::uuid[])`);
+    }
     if (fleetIds.length === 1) {
       totalsParams.push(fleetIds[0]);
       totalsConditions.push(`fleet_id = $${totalsParams.length}`);
@@ -135,7 +150,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const detailQuery = `
       SELECT
         il.inspection_date,
-        il.fleet_id,
+        ${inspectionFleet} AS fleet_id,
         il.inspector_name,
         il.overall_status,
         il.frequency,
@@ -188,7 +203,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       SELECT
         il.id AS inspection_id,
         il.inspection_date,
-        il.fleet_id,
+        ${inspectionFleet} AS fleet_id,
         il.inspector_name,
         il.overall_status,
         il.frequency,

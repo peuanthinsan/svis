@@ -418,7 +418,7 @@ const historyStyles = StyleSheet.create({
 
 export default function DashboardScreen() {
   const { t } = useI18n();
-  const { fleetId, isAdmin } = useRole();
+  const { fleetId, isAdmin, isVehicleOwner } = useRole();
   const { user } = useAuth();
   const [data, setData] = useState<DashboardData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -427,7 +427,7 @@ export default function DashboardScreen() {
   const fetchDashboard = useCallback(async () => {
     try {
       setError(null);
-      const url = isAdmin ? '/api/dashboard' : `/api/dashboard?fleetId=${fleetId}`;
+      const url = isAdmin || isVehicleOwner ? '/api/dashboard' : `/api/dashboard?fleetId=${fleetId}`;
       const d = await apiFetch(url);
       setData(d);
     } catch (err) {
@@ -437,7 +437,7 @@ export default function DashboardScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [fleetId, isAdmin, t]);
+  }, [fleetId, isAdmin, isVehicleOwner, t]);
 
   useFocusEffect(
     useCallback(() => {
@@ -583,7 +583,7 @@ export default function DashboardScreen() {
         )}
 
         {/* ─── History Section ─── */}
-        <HistorySection fleetId={fleetId} isAdmin={isAdmin} />
+        <HistorySection fleetId={isVehicleOwner ? '' : fleetId} isAdmin={isAdmin} />
       </ScrollView>
 
     </View>

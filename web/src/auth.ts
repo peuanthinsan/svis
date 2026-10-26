@@ -1,4 +1,4 @@
-export type Role = 'driver' | 'supervisor' | 'admin';
+export type Role = 'driver' | 'supervisor' | 'admin' | 'vehicle_owner';
 
 export type User = {
   id: string;
@@ -42,5 +42,5 @@ export function clearSession() {
 }
 
 export function canAccessDashboard(role: Role) {
-  return role === 'supervisor' || role === 'admin';
+  return role === 'supervisor' || role === 'admin' || role === 'vehicle_owner';
 }

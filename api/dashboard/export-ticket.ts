@@ -3,6 +3,7 @@ import { neon } from '@neondatabase/serverless';
 import { getJwtSecret, verifyAuth } from '../../lib/api-auth';
 import { ExportRequestError, issueExportTicket, resolveExportScope } from '../../lib/export-download-ticket';
 import { logExportFailure, setExportResponseHeaders } from '../../lib/export-http';
+import { getOwnerVehicleIds } from '../../lib/vehicle-access';
 
 export const config = { api: { bodyParser: { sizeLimit: '8kb' } } };
 
@@ -22,6 +23,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     }
     const scope = resolveExportScope(user, req.body);
     const sql = neon(process.env.DATABASE_URL!);
+    const vehicleIds = await getOwnerVehicleIds(sql, user);
+    if (vehicleIds !== null) scope.vehicleIds = vehicleIds;
     const ticket = await issueExportTicket(sql, scope, getJwtSecret());
     return res.status(200).json(ticket);
   } catch (error) {

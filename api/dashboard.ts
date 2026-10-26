@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
+import { getOwnerVehicleIds } from '../lib/vehicle-access';
 import { verifyAuth } from '../lib/api-auth';
 import { getTodayThai, getMondayOfWeekThai } from '../lib/thai-date';
 import { fetchSheetVehicles, recordVehicleActivity, type SheetVehicle } from '../lib/unit-status-sheet';
@@ -42,15 +43,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const today = getTodayThai();
   const monday = getMondayOfWeekThai();
 
-  // Admins may filter to one fleet via ?fleetId; non-admins are locked to their JWT fleet.
-  // `fleet = null` means "all fleets in scope" (admins only). Fail closed: a non-admin with
-  // no fleet is denied, never falls through to null → all fleets. Every query guards with
-  // (fleet IS NULL OR col = fleet).
+  // Owners may filter their assigned vehicles by fleet. Drivers and supervisors
+  // remain fleet-bound; owner IDs are applied before every aggregate and list.
   const isAdmin = user.role === 'admin';
-  const fleet: string | null = isAdmin ? ((req.query.fleetId as string) || null) : (user.fleetId || null);
-  if (!isAdmin && !fleet) return res.status(403).json({ error: 'Forbidden' });
+  const isOwner = user.role === 'vehicle_owner';
+  const fleet: string | null = (isAdmin || isOwner) ? ((req.query.fleetId as string) || null) : (user.fleetId || null);
+  if (!isAdmin && !isOwner && !fleet) return res.status(403).json({ error: 'Forbidden' });
 
   try {
+    const ownerVehicleIds = await getOwnerVehicleIds(sql, user);
     let telematicsUnavailable = false;
     const [vehicleRows, inspectedRows, weeklyInspectedRows, oosRows, issueCount, defectRows, fleetTotals, fleetChecked, sheetVehicles] = await Promise.all([
       // All vehicles in scope (composition + plate matching against the GPS sheet).
@@ -58,6 +59,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         SELECT id, plate_number, vehicle_type, fleet_id, tax_expiry_date
         FROM vehicle_master
         WHERE company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR id = ANY(${ownerVehicleIds}::uuid[]))
           AND (${fleet}::text IS NULL OR fleet_id = ${fleet})
           AND is_active
       `,
@@ -68,6 +70,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         JOIN vehicle_master v ON v.id = i.vehicle_id
         WHERE i.inspection_date = ${today}
           AND i.company_id = ${user.companyId}
+          AND v.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
           AND i.frequency IN ('daily', 'post_route')
           AND v.is_active
           AND (${fleet}::text IS NULL OR v.fleet_id = ${fleet})
@@ -79,6 +83,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         JOIN vehicle_master v ON v.id = i.vehicle_id
         WHERE i.frequency = 'weekly'
           AND i.company_id = ${user.companyId}
+          AND v.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
           AND i.inspection_date >= ${monday}
           AND i.inspection_date <= ${today}
           AND v.is_active
@@ -96,6 +102,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           JOIN vehicle_master v ON v.id = il.vehicle_id
           WHERE il.vehicle_usable IS NOT NULL
             AND il.company_id = ${user.companyId}
+            AND v.company_id = ${user.companyId}
+            AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
             AND v.is_active
             AND (${fleet}::text IS NULL OR v.fleet_id = ${fleet})
           ORDER BY il.vehicle_id, il.inspection_date DESC, il.created_at DESC
@@ -113,7 +121,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         JOIN vehicle_master vm ON vm.id = ir.vehicle_id AND vm.is_active
         WHERE ir.status IN ('open', 'in_progress')
           AND ir.company_id = ${user.companyId}
-          AND (${fleet}::text IS NULL OR ir.fleet_id = ${fleet})
+          AND vm.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR vm.id = ANY(${ownerVehicleIds}::uuid[]))
+          AND (${fleet}::text IS NULL OR vm.fleet_id = ${fleet})
       `,
       // Defect vehicle list (drives the Notify-vendor rows).
       sql`
@@ -125,7 +135,9 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         JOIN vehicle_master vm ON vm.id = ir.vehicle_id AND vm.is_active
         WHERE ir.status IN ('open', 'in_progress')
           AND ir.company_id = ${user.companyId}
-          AND (${fleet}::text IS NULL OR ir.fleet_id = ${fleet})
+          AND vm.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR vm.id = ANY(${ownerVehicleIds}::uuid[]))
+          AND (${fleet}::text IS NULL OR vm.fleet_id = ${fleet})
         ORDER BY ir.created_at ASC
         LIMIT 50
       `,
@@ -134,6 +146,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         SELECT fleet_id, COUNT(*)::int AS total
         FROM vehicle_master
         WHERE company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR id = ANY(${ownerVehicleIds}::uuid[]))
           AND (${fleet}::text IS NULL OR fleet_id = ${fleet})
           AND is_active
         GROUP BY fleet_id
@@ -145,6 +158,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         JOIN vehicle_master v ON v.id = i.vehicle_id
         WHERE i.inspection_date = ${today} AND i.frequency = 'daily'
           AND i.company_id = ${user.companyId}
+          AND v.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
           AND v.is_active
           AND (${fleet}::text IS NULL OR v.fleet_id = ${fleet})
         GROUP BY v.fleet_id
@@ -197,9 +212,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           WHERE a.activity_date >= ${monday}
             AND a.activity_date <= ${today}
             AND a.company_id = ${user.companyId}
+            AND v.company_id = ${user.companyId}
+            AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
             AND (${fleet}::text IS NULL OR v.fleet_id = ${fleet})
         `,
-        recordVehicleActivity(sql, sheetVehicles!, today, user.companyId),
+        isOwner ? Promise.resolve() : recordVehicleActivity(sql, sheetVehicles!, today, user.companyId),
       ]);
       const weeklyActivityRefs = [...weeklyActiveRows as VehicleRef[], ...activeRefs];
       weeklyActiveByType = countByType(weeklyActivityRefs);

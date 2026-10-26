@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
+import { getOwnerVehicleIds } from '../lib/vehicle-access';
 import { sendInspectionFailEmail } from '../lib/email';
 import { verifyAuth, AuthUser } from '../lib/api-auth';
 import { logAudit } from '../lib/audit';
@@ -22,12 +23,14 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
     }
     const requestedFrequency = typeof frequency === 'string' ? frequency : null;
 
-    // Company scope always applies; non-admins are additionally locked to their fleet.
+    const ownerVehicleIds = await getOwnerVehicleIds(sql, user);
+    // Owners need a direct grant; drivers and supervisors stay in their fleet.
     const [veh] = await sql`
       SELECT fleet_id FROM vehicle_master
       WHERE id = ${vehicleId as string} AND company_id = ${user.companyId}
+        AND (${ownerVehicleIds}::uuid[] IS NULL OR id = ANY(${ownerVehicleIds}::uuid[]))
     `;
-    if (!veh || (user.role !== 'admin' && veh.fleet_id !== user.fleetId)) {
+    if (!veh || (user.role !== 'admin' && user.role !== 'vehicle_owner' && veh.fleet_id !== user.fleetId)) {
       return res.status(404).json({ error: 'Not found' });
     }
 
@@ -41,6 +44,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         JOIN checklist_items ci ON ci.id = ir.checklist_item_id
         WHERE irep.vehicle_id = ${vehicleId as string}
           AND irep.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR irep.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
           AND irep.status IN ('open', 'in_progress')
       `;
       return res.status(200).json({ items });
@@ -54,6 +58,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         JOIN vehicle_master vm ON vm.id = il.vehicle_id
         WHERE il.vehicle_id = ${vehicleId as string}
           AND il.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR il.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
           AND il.inspection_date = ${date as string}
           AND il.frequency = ${requestedFrequency}
         ORDER BY il.created_at DESC
@@ -65,6 +70,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         JOIN vehicle_master vm ON vm.id = il.vehicle_id
         WHERE il.vehicle_id = ${vehicleId as string}
           AND il.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR il.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
           AND il.inspection_date = ${date as string}
         ORDER BY il.created_at DESC
       `;
@@ -75,6 +81,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         JOIN vehicle_master vm ON vm.id = il.vehicle_id
         WHERE il.vehicle_id = ${vehicleId as string}
           AND il.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR il.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
           AND il.inspection_date >= ${since as string}
           AND il.frequency = ${requestedFrequency}
         ORDER BY il.created_at DESC
@@ -86,6 +93,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         JOIN vehicle_master vm ON vm.id = il.vehicle_id
         WHERE il.vehicle_id = ${vehicleId as string}
           AND il.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR il.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
           AND il.inspection_date >= ${since as string}
         ORDER BY il.created_at DESC
       `;
@@ -96,6 +104,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         JOIN vehicle_master vm ON vm.id = il.vehicle_id
         WHERE il.vehicle_id = ${vehicleId as string}
           AND il.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR il.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
           AND il.frequency = ${requestedFrequency}
         ORDER BY il.inspection_date DESC
         LIMIT 30
@@ -107,6 +116,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         JOIN vehicle_master vm ON vm.id = il.vehicle_id
         WHERE il.vehicle_id = ${vehicleId as string}
           AND il.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR il.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
         ORDER BY il.inspection_date DESC
         LIMIT 30
       `;
@@ -331,6 +341,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (req.method === 'GET') return handleGet(req, res, user);
+  if (user.role === 'vehicle_owner') return res.status(403).json({ error: 'Vehicle owners have read-only access' });
   if (req.method === 'PUT') return handlePut(req, res, user);
   if (req.method === 'DELETE') return handleDelete(req, res, user);
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });

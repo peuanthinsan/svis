@@ -10,7 +10,7 @@ import {
   readAuthUser,
 } from './auth-storage';
 
-export type UserRole = 'driver' | 'supervisor' | 'admin';
+export type UserRole = 'driver' | 'supervisor' | 'admin' | 'vehicle_owner';
 
 export type AuthUser = {
   id: string;

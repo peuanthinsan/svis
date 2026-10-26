@@ -31,14 +31,22 @@ function neon(connectionString){
   return new Query(pool,text,values);
  }
  sql.query=(text,values=[])=>new Query(pool,text,values);
- sql.transaction=async queries=>{
+ sql.transaction=async(queries,options={})=>{
   if(typeof queries==='function')queries=queries(sql);
   if(!Array.isArray(queries)||queries.some(q=>!(q instanceof Query)||q.pool!==pool||q.promise))throw new Error('Transaction requires unexecuted queries from this database');
   const parent=transactionContext.getStore();const nested=parent?.pool===pool;
+  const levels={ReadUncommitted:'READ UNCOMMITTED',ReadCommitted:'READ COMMITTED',RepeatableRead:'REPEATABLE READ',Serializable:'SERIALIZABLE'};
+  const isolation=options.isolationLevel||'ReadCommitted';
+  if(!Object.hasOwn(levels,isolation))throw new Error('Unsupported transaction isolation level');
+  // Request transactions already run at READ COMMITTED. PostgreSQL cannot
+  // change isolation or read-only mode within a savepoint; reject mismatches
+  // rather than silently weaken the caller's consistency requirement.
+  if(nested&&(isolation!=='ReadCommitted'||options.readOnly||options.deferrable))throw new Error('Unsupported nested transaction options');
+  const begin='BEGIN ISOLATION LEVEL '+levels[isolation]+(options.readOnly?' READ ONLY':'')+(options.deferrable?' DEFERRABLE':'');
   const client=nested?parent.client:await pool.connect();
   const savepoint=nested?'svis_batch_'+(++parent.savepoint):null;
   try{
-   await client.query(nested?'SAVEPOINT '+savepoint:'BEGIN');const results=[];
+   await client.query(nested?'SAVEPOINT '+savepoint:begin);const results=[];
    for(const query of queries)results.push((await client.query(query.text,query.values)).rows);
    const committed=await client.query(nested?'RELEASE SAVEPOINT '+savepoint:'COMMIT');
    if(!nested&&committed.command!=='COMMIT')throw new Error('Database transaction did not commit');
@@ -58,7 +66,7 @@ async function withRequestTransaction(connectionString,fn,shouldCommit=()=>true)
  const pool=poolFor(connectionString);const client=await pool.connect();
  const effects=[];let result;let committed=false;
  try{
-  await client.query('BEGIN');
+  await client.query('BEGIN ISOLATION LEVEL READ COMMITTED');
   result=await transactionContext.run({pool,client,savepoint:0,afterCommit:effects},fn);
   const commit=shouldCommit();const completed=await client.query(commit?'COMMIT':'ROLLBACK');
   if(commit&&completed.command!=='COMMIT')throw new Error('Database transaction did not commit');

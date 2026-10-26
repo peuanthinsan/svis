@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { AdminUser, fetchAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser, importAdminUsers, UserImportMode, UserImportSummary, downloadExport } from '../../api';
+import { AdminUser, fetchAdminUsers, createAdminUser, updateAdminUser, deleteAdminUser, importAdminUsers, UserImportMode, UserImportSummary, downloadExport, fetchAdminUserVehicles, fetchAdminVehicles, type OwnerVehicleOption } from '../../api';
 import { t } from '../../i18n';
 import { useDebounce } from '../../useDebounce';
+import { loadCompleteVehicleCatalog } from '../../owner-vehicle-selection';
+import { OwnerVehicleSelector } from './OwnerVehicleSelector';
 
 type Form = { username: string; password: string; firstName: string; lastName: string; role: string; fleetId: string };
 const BLANK: Form = { username: '', password: '', firstName: '', lastName: '', role: 'driver', fleetId: '' };
 
 const PAGE_LIMIT = 100;
-const ROLES = ['all', 'driver', 'supervisor', 'admin'];
+const ROLES = ['all', 'driver', 'supervisor', 'admin', 'vehicle_owner'];
 
 export function UsersTab() {
   const [users, setUsers] = useState<AdminUser[]>([]);
@@ -27,8 +29,15 @@ export function UsersTab() {
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [ownerVehicles, setOwnerVehicles] = useState<OwnerVehicleOption[]>([]);
+  const [selectedVehicleIds, setSelectedVehicleIds] = useState<string[]>([]);
+  const [vehiclesLoading, setVehiclesLoading] = useState(false);
+  const [vehiclesLoaded, setVehiclesLoaded] = useState(false);
+  const [vehiclesError, setVehiclesError] = useState('');
+  const [vehicleRetry, setVehicleRetry] = useState(0);
   const offsetRef = useRef(0);
   const seqRef = useRef(0);
+  const vehicleLoadSeqRef = useRef(0);
   const debouncedSearch = useDebounce(search, 300);
 
   function load(reset: boolean) {
@@ -88,20 +97,59 @@ export function UsersTab() {
     load(false);
   }
 
-  function openCreate() { setForm(BLANK); setModal('create'); setError(''); }
+  useEffect(() => {
+    if (!modal || form.role !== 'vehicle_owner' || vehiclesLoaded) return;
+    let cancelled = false;
+    const sequence = ++vehicleLoadSeqRef.current;
+    setVehiclesLoading(true); setVehiclesError('');
+    const request = modal !== 'create' && modal.role === 'vehicle_owner'
+      ? fetchAdminUserVehicles(modal.id)
+      : loadCompleteVehicleCatalog(fetchAdminVehicles).then((vehicles) => ({ vehicles, selectedVehicleIds: [] as string[] }));
+    request.then((result) => {
+      if (cancelled || sequence !== vehicleLoadSeqRef.current) return;
+      setOwnerVehicles(result.vehicles);
+      setSelectedVehicleIds(result.selectedVehicleIds);
+      setVehiclesLoading(false);
+      setVehiclesLoaded(true);
+    }).catch((failure) => {
+      if (!cancelled && sequence === vehicleLoadSeqRef.current) {
+        setVehiclesError(failure instanceof Error ? failure.message : t('error'));
+        setVehiclesLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
+  }, [modal, form.role, vehiclesLoaded, vehicleRetry]);
+
+  function resetVehicleEditor() {
+    vehicleLoadSeqRef.current++;
+    setOwnerVehicles([]); setSelectedVehicleIds([]); setVehiclesLoaded(false);
+    setVehiclesLoading(false); setVehiclesError('');
+  }
+
+  function closeEditor() {
+    if (saving) return;
+    vehicleLoadSeqRef.current++;
+    setModal(null);
+  }
+
+  function openCreate() { resetVehicleEditor(); setForm(BLANK); setModal('create'); setError(''); }
   function openEdit(u: AdminUser) {
+    resetVehicleEditor();
     setForm({ username: u.username, password: '', firstName: u.first_name, lastName: u.last_name, role: u.role, fleetId: u.fleet_id || '' });
     setModal(u); setError('');
   }
 
   async function handleSave() {
+    if (saving || (form.role === 'vehicle_owner' && (!vehiclesLoaded || vehiclesLoading || vehiclesError))) return;
     setSaving(true); setError('');
     try {
+      const vehicleIds = form.role === 'vehicle_owner' ? selectedVehicleIds : undefined;
+      const fleetId = form.role === 'vehicle_owner' ? '' : form.fleetId || undefined;
       if (modal === 'create') {
-        await createAdminUser({ ...form, fleetId: form.fleetId || undefined });
+        await createAdminUser({ ...form, fleetId, vehicleIds });
       } else if (modal) {
         const payload: Parameters<typeof updateAdminUser>[1] = {
-          firstName: form.firstName, lastName: form.lastName, role: form.role, fleetId: form.fleetId || undefined,
+          firstName: form.firstName, lastName: form.lastName, role: form.role, fleetId, vehicleIds,
         };
         if (form.password) payload.password = form.password;
         await updateAdminUser(modal.id, payload);
@@ -168,7 +216,7 @@ export function UsersTab() {
     }
   }
 
-  const roleLabel: Record<string, string> = { all: t('all'), driver: t('driver'), supervisor: t('supervisor'), admin: t('admin') };
+  const roleLabel: Record<string, string> = { all: t('all'), driver: t('driver'), supervisor: t('supervisor'), admin: t('admin'), vehicle_owner: t('vehicle_owner') };
 
   return (
     <div className="panel panel--flush">
@@ -259,14 +307,17 @@ export function UsersTab() {
       )}
 
       {modal !== null && (
-        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', display: 'grid', placeItems: 'center', zIndex: 100 }}>
-          <div style={{ background: 'var(--panel)', borderRadius: 16, padding: 28, width: 'min(460px, 95vw)', display: 'grid', gap: 14 }}>
-            <h3 style={{ margin: 0 }}>{modal === 'create' ? `+ ${t('adminUsers')}` : `${t('editAction')} ${(modal as AdminUser).username}`}</h3>
+        <div className="user-editor-overlay" onKeyDown={(event) => { if (event.key === 'Escape') closeEditor(); }}>
+          <div className={`user-editor${form.role === 'vehicle_owner' ? ' user-editor--owner' : ''}`} role="dialog" aria-modal="true" aria-labelledby="user-editor-title">
+            <h3 id="user-editor-title" style={{ margin: 0 }}>{modal === 'create' ? `+ ${t('adminUsers')}` : `${t('editAction')} ${(modal as AdminUser).username}`}</h3>
             {error && <div className="alert alert--error">{error}</div>}
-            {['firstName', 'lastName', 'fleetId'].map((field) => (
+            {(form.role === 'vehicle_owner' ? ['firstName', 'lastName'] : ['firstName', 'lastName', 'fleetId']).map((field) => (
               <label key={field} style={{ display: 'grid', gap: 4, fontSize: 13, fontWeight: 600 }}>
-                {t(field as 'firstName')}
+                {form.role === 'vehicle_owner' && field === 'firstName' ? t('ownerCustomerName')
+                  : form.role === 'vehicle_owner' && field === 'lastName' ? t('ownerOptionalLastName')
+                  : t(field as 'firstName')}
                 <input
+                  disabled={saving}
                   value={(form as any)[field]}
                   onChange={(e) => setForm((f) => ({ ...f, [field]: e.target.value }))}
                   style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', fontSize: 14 }}
@@ -276,27 +327,33 @@ export function UsersTab() {
             {modal === 'create' && (
               <label style={{ display: 'grid', gap: 4, fontSize: 13, fontWeight: 600 }}>
                 {t('username')}
-                <input value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
+                <input disabled={saving} value={form.username} onChange={(e) => setForm((f) => ({ ...f, username: e.target.value }))}
                   style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', fontSize: 14 }} />
               </label>
             )}
             <label style={{ display: 'grid', gap: 4, fontSize: 13, fontWeight: 600 }}>
               {modal === 'create' ? t('password') : t('newPassword')}
-              <input type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
+              <input disabled={saving} type="password" value={form.password} onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
                 style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', fontSize: 14 }} />
             </label>
             <label style={{ display: 'grid', gap: 4, fontSize: 13, fontWeight: 600 }}>
               {t('role')}
-              <select value={form.role} onChange={(e) => setForm((f) => ({ ...f, role: e.target.value }))}
+              <select aria-label={t('role')} disabled={saving} value={form.role} onChange={(e) => { vehicleLoadSeqRef.current++; setForm((f) => ({ ...f, role: e.target.value })); }}
                 style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', fontSize: 14 }}>
                 <option value="driver">{t('driver')}</option>
                 <option value="supervisor">{t('supervisor')}</option>
                 <option value="admin">{t('admin')}</option>
+                <option value="vehicle_owner">{t('vehicle_owner')}</option>
               </select>
             </label>
-            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-              <button type="button" className="btn btn--secondary" onClick={() => setModal(null)}>{t('cancel')}</button>
-              <button type="button" className="btn btn--accent" onClick={handleSave} disabled={saving}>{saving ? t('saving') : t('save')}</button>
+            {form.role === 'vehicle_owner' && <>
+              {vehiclesLoading && <p className="muted" role="status">{t('ownerLoadingVehicles')}</p>}
+              {vehiclesError && <div className="alert alert--error" role="alert">{vehiclesError}<button type="button" className="link-btn" onClick={() => setVehicleRetry((value) => value + 1)}>{t('retry')}</button></div>}
+              {vehiclesLoaded && <OwnerVehicleSelector vehicles={ownerVehicles} selectedIds={selectedVehicleIds} onChange={setSelectedVehicleIds} disabled={saving} />}
+            </>}
+            <div className="user-editor__footer">
+              <button type="button" className="btn btn--secondary" disabled={saving} onClick={closeEditor}>{t('cancel')}</button>
+              <button type="button" className="btn btn--accent" onClick={handleSave} disabled={saving || (form.role === 'vehicle_owner' && (!vehiclesLoaded || vehiclesLoading || !!vehiclesError))}>{saving ? t('saving') : t('save')}</button>
             </div>
           </div>
         </div>

@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
+import { getOwnerVehicleIds } from '../lib/vehicle-access';
 import { verifyAuth, AuthUser } from '../lib/api-auth';
 import { getTodayThai } from '../lib/thai-date';
 
@@ -90,10 +91,12 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
   const windowStart = addDays(today, -USAGE_WINDOW_DAYS);
 
   const isAdmin = user.role === 'admin';
-  const fleet: string | null = isAdmin ? ((req.query.fleetId as string) || null) : (user.fleetId || null);
-  if (!isAdmin && !fleet) return res.status(403).json({ error: 'Forbidden' });
+  const isOwner = user.role === 'vehicle_owner';
+  const fleet: string | null = (isAdmin || isOwner) ? ((req.query.fleetId as string) || null) : (user.fleetId || null);
+  if (!isAdmin && !isOwner && !fleet) return res.status(403).json({ error: 'Forbidden' });
 
   try {
+    const ownerVehicleIds = await getOwnerVehicleIds(sql, user);
     const rows = await sql`
       SELECT v.id, v.plate_number, v.fleet_id, v.vehicle_type, v.region,
         v.tax_expiry_date,
@@ -120,6 +123,7 @@ async function handleGet(req: VercelRequest, res: VercelResponse, user: AuthUser
         ORDER BY inspection_date ASC, created_at ASC LIMIT 1
       ) earliest ON true
       WHERE v.company_id = ${user.companyId}
+        AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
         AND (${fleet}::text IS NULL OR v.fleet_id = ${fleet})
       ORDER BY v.plate_number
     `;

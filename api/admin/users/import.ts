@@ -5,11 +5,12 @@ import bcrypt from 'bcryptjs';
 import { requireAdmin } from '../../../lib/admin-auth';
 import { BCRYPT_ROUNDS, AuthUser } from '../../../lib/api-auth';
 import { logAudit } from '../../../lib/audit';
+import { ADMIN_USER_ROLES } from '../../../lib/owner-vehicle-assignment';
 
 export const config = { api: { bodyParser: false } };
 
 const MAX_IMPORT_SIZE = 5 * 1024 * 1024;
-const VALID_ROLES = new Set(['driver', 'supervisor', 'admin']);
+const VALID_ROLES = new Set<string>(ADMIN_USER_ROLES);
 type Mode = 'add' | 'modify' | 'replace';
 type ImportRow = { username: string; firstName: string; lastName: string; role: string; fleetId: string; password?: string; sourceRow: number };
 type ExistingUser = { id: string; username: string; first_name: string; last_name: string; role: string; fleet_id: string; is_active: boolean };
@@ -23,6 +24,7 @@ function key(value: unknown): string { return text(value).toLowerCase().replace(
 function usernameFor(name: string): string { return name.toLowerCase().trim().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, ''); }
 function splitName(name: string): [string, string] { const parts = name.trim().split(/\s+/).filter(Boolean); return [parts.shift() || '', parts.join(' ')]; }
 function roleFor(value: string): string {
+  if (key(value) === 'vehicleowner') return 'vehicle_owner';
   if (/^admin\s*-\s*co$/i.test(value)) return 'admin';
   if (/^admin\s*-\s*/i.test(value)) return 'supervisor';
   return value.toLowerCase() === 'user' ? 'driver' : value.toLowerCase();
@@ -93,10 +95,13 @@ async function parseRows(data: Buffer, filename: string): Promise<{ rows: Import
       if (!hasValues) continue;
       if (rowIsStruck(row, [usernameCol, firstCol, lastCol, nameCol, emailCol, roleCol, fleetCol, passwordCol].filter(Boolean) as number[])) { skippedStruck++; continue; }
       const name = nameCol ? text(row.getCell(nameCol).value) : [firstCol ? text(row.getCell(firstCol).value) : '', lastCol ? text(row.getCell(lastCol).value) : ''].filter(Boolean).join(' ');
-      const [firstName, lastName] = splitName(name);
+      const role = roleFor(roleCol ? text(row.getCell(roleCol).value) : '');
+      const [firstName, lastName] = role === 'vehicle_owner'
+        ? nameCol ? [name, ''] : [firstCol ? text(row.getCell(firstCol).value) : '', lastCol ? text(row.getCell(lastCol).value) : '']
+        : splitName(name);
       const email = emailCol ? text(row.getCell(emailCol).value).toLowerCase() : '';
       const username = (usernameCol ? text(row.getCell(usernameCol).value) : '') || usernameFor(name || email.split('@')[0]);
-      rows.push({ username, firstName, lastName, role: roleFor(roleCol ? text(row.getCell(roleCol).value) : ''), fleetId: fleetCol ? text(row.getCell(fleetCol).value) : '', password: passwordCol ? text(row.getCell(passwordCol).value) || undefined : undefined, sourceRow: rowNumber });
+      rows.push({ username, firstName, lastName, role, fleetId: fleetCol ? text(row.getCell(fleetCol).value) : '', password: passwordCol ? text(row.getCell(passwordCol).value) || undefined : undefined, sourceRow: rowNumber });
     }
   } else {
     const lines = data.toString('utf8').replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim());
@@ -106,14 +111,33 @@ async function parseRows(data: Buffer, filename: string): Promise<{ rows: Import
     const col = (names: string[]) => names.map((name) => headers.get(key(name))).find((index) => index !== undefined);
     const usernameCol = col(['username', 'user name', 'login']); const firstCol = col(['first name', 'firstname']); const lastCol = col(['last name', 'lastname', 'surname']); const nameCol = col(['name', 'employee name', 'name - surname']); const emailCol = col(['email', 'e-mail', 'email address']); const roleCol = col(['role', 'position']); const fleetCol = col(['fleet', 'fleet id', 'service center', 'sub section']); const passwordCol = col(['password', 'pw']);
     if ((usernameCol === undefined && nameCol === undefined && emailCol === undefined) || roleCol === undefined) throw new Error('Required columns: Username (or Name/Email) and Role');
-    for (let i = 1; i < lines.length; i++) { const cells = parseCsv(lines[i]); const name = nameCol !== undefined ? cells[nameCol] : [firstCol !== undefined ? cells[firstCol] : '', lastCol !== undefined ? cells[lastCol] : ''].filter(Boolean).join(' '); const [firstName, lastName] = splitName(name); const email = emailCol !== undefined ? cells[emailCol].toLowerCase() : ''; const username = (usernameCol !== undefined ? cells[usernameCol] : '') || usernameFor(name || email.split('@')[0]); rows.push({ username, firstName, lastName, role: roleFor(cells[roleCol] || ''), fleetId: fleetCol !== undefined ? cells[fleetCol] : '', password: passwordCol !== undefined ? cells[passwordCol] || undefined : undefined, sourceRow: i + 1 }); }
+    for (let i = 1; i < lines.length; i++) {
+      const cells = parseCsv(lines[i]);
+      const name = nameCol !== undefined ? cells[nameCol] || '' : [firstCol !== undefined ? cells[firstCol] : '', lastCol !== undefined ? cells[lastCol] : ''].filter(Boolean).join(' ');
+      const role = roleFor(cells[roleCol] || '');
+      const [firstName, lastName] = role === 'vehicle_owner'
+        ? nameCol !== undefined ? [name, ''] : [firstCol !== undefined ? cells[firstCol] || '' : '', lastCol !== undefined ? cells[lastCol] || '' : '']
+        : splitName(name);
+      const email = emailCol !== undefined ? (cells[emailCol] || '').toLowerCase() : '';
+      const username = (usernameCol !== undefined ? cells[usernameCol] : '') || usernameFor(name || email.split('@')[0]);
+      rows.push({ username, firstName, lastName, role, fleetId: fleetCol !== undefined ? cells[fleetCol] || '' : '', password: passwordCol !== undefined ? cells[passwordCol] || undefined : undefined, sourceRow: i + 1 });
+    }
   }
   return { rows, skippedStruck };
 }
 
 function validateRows(rows: ImportRow[]): string[] {
   const errors: string[] = []; const seen = new Set<string>();
-  rows.forEach((row) => { const username = row.username.toLowerCase(); if (!username || !row.firstName || !row.lastName) errors.push(`Row ${row.sourceRow}: username, first name, and last name are required`); if (!VALID_ROLES.has(row.role)) errors.push(`Row ${row.sourceRow}: invalid role "${row.role}"`); if (seen.has(username)) errors.push(`Row ${row.sourceRow}: duplicate username "${row.username}"`); seen.add(username); });
+  rows.forEach((row) => {
+    const username = row.username.toLowerCase();
+    if (!username || !row.firstName || (row.role !== 'vehicle_owner' && !row.lastName)) {
+      errors.push(`Row ${row.sourceRow}: username and first name are required; last name is required except for vehicle owners`);
+    }
+    if (row.firstName.length > 100 || row.lastName.length > 100) errors.push(`Row ${row.sourceRow}: names must be at most 100 characters`);
+    if (!VALID_ROLES.has(row.role)) errors.push(`Row ${row.sourceRow}: invalid role "${row.role}"`);
+    if (seen.has(username)) errors.push(`Row ${row.sourceRow}: duplicate username "${row.username}"`);
+    seen.add(username);
+  });
   return errors;
 }
 
@@ -144,8 +168,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     for (const row of mode === 'modify' ? plan.updates : mode === 'add' ? plan.inserts : parsed.rows) {
       const current = plan.existing.find((user) => user.username.toLowerCase() === row.username.toLowerCase());
       const hash = row.password ? await bcrypt.hash(row.password, BCRYPT_ROUNDS) : null;
-      if (current) queries.push(sql.query('UPDATE users SET first_name = $1, last_name = $2, role = $3, fleet_id = $4, is_active = true, password_hash = COALESCE($5, password_hash), updated_at = NOW() WHERE id = $6 AND company_id = $7', [row.firstName, row.lastName, row.role, row.fleetId, hash, current.id, admin.companyId]));
-      else queries.push(sql.query('INSERT INTO users (company_id, username, password_hash, first_name, last_name, role, fleet_id, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7, true)', [admin.companyId, row.username, hash, row.firstName, row.lastName, row.role, row.fleetId]));
+      const fleetId = row.role === 'vehicle_owner' ? '' : row.fleetId;
+      if (current) {
+        queries.push(sql.query('UPDATE users SET first_name = $1, last_name = $2, role = $3, fleet_id = $4, is_active = true, password_hash = COALESCE($5, password_hash), updated_at = NOW() WHERE id = $6 AND company_id = $7', [row.firstName, row.lastName, row.role, fleetId, hash, current.id, admin.companyId]));
+        // Owner-to-owner import preserves the checklist. Converting roles revokes it.
+        if (row.role !== 'vehicle_owner') queries.push(sql.query('DELETE FROM user_vehicle_access WHERE user_id = $1::uuid AND company_id = $2::uuid', [current.id, admin.companyId]));
+      } else queries.push(sql.query('INSERT INTO users (company_id, username, password_hash, first_name, last_name, role, fleet_id, is_active) VALUES ($1, $2, $3, $4, $5, $6, $7, true)', [admin.companyId, row.username, hash, row.firstName, row.lastName, row.role, fleetId]));
     }
     for (const user of plan.deactivate) queries.push(sql.query('UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1 AND company_id = $2', [user.id, admin.companyId]));
     await sql.transaction(queries);

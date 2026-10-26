@@ -87,7 +87,7 @@ test('request transactions use savepoints for SQL batches and notify only after 
   });
   assert.equal(result, 'saved');
   assert.deepEqual(a.calls.map(c => c.text), [
-    'CONNECT', 'BEGIN', 'SAVE_INSPECTION', 'SAVEPOINT svis_batch_1', 'SET_RLS',
+    'CONNECT', 'BEGIN ISOLATION LEVEL READ COMMITTED', 'SAVE_INSPECTION', 'SAVEPOINT svis_batch_1', 'SET_RLS',
     'SAVE_RESULTS', 'RELEASE SAVEPOINT svis_batch_1', 'COMMIT', 'RELEASE', 'NOTIFY',
   ]);
 });
@@ -97,7 +97,7 @@ test('unsuccessful responses roll back and discard queued notifications', async 
   await a.withRequestTransaction(local, async () => {
     await a.afterCommit(() => a.calls.push({ text: 'NOTIFY' }));
   }, () => false);
-  assert.deepEqual(a.calls.map(c => c.text), ['CONNECT', 'BEGIN', 'ROLLBACK', 'RELEASE']);
+  assert.deepEqual(a.calls.map(c => c.text), ['CONNECT', 'BEGIN ISOLATION LEVEL READ COMMITTED', 'ROLLBACK', 'RELEASE']);
 });
 
 test('query errors and silently aborted commits fail the request and release the client', async () => {
@@ -119,5 +119,20 @@ test('a notification failure after commit does not fail an already saved respons
     await a.afterCommit(async () => { throw new Error('mail unavailable'); });
     return 'saved';
   }), 'saved');
-  assert.deepEqual(a.calls.map(c => c.text), ['CONNECT', 'BEGIN', 'COMMIT', 'RELEASE']);
+  assert.deepEqual(a.calls.map(c => c.text), ['CONNECT', 'BEGIN ISOLATION LEVEL READ COMMITTED', 'COMMIT', 'RELEASE']);
+});
+
+test('transaction options set standalone isolation and preserve request READ COMMITTED batches', async () => {
+  const a = adapter();
+  const sql = a.neon(local);
+  await sql.transaction([sql.query('READ_OWNER_CATALOG')], { isolationLevel: 'RepeatableRead', readOnly: true });
+  assert.ok(a.calls.some(c => c.text === 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'));
+  await a.withRequestTransaction(local, async () => {
+    await sql.query('AUTH_ACCOUNT');
+    await sql.transaction([sql.query('LOCK_OWNER'), sql.query('REPLACE_GRANTS')], { isolationLevel: 'ReadCommitted' });
+    await assert.rejects(sql.transaction([sql.query('UNSUPPORTED')], { isolationLevel: 'RepeatableRead' }), /Unsupported nested/);
+  });
+  assert.ok(a.calls.some(c => c.text === 'SAVEPOINT svis_batch_1'));
+  assert.ok(!a.calls.some(c => /^SET TRANSACTION|^UNSUPPORTED$/.test(c.text)));
+  assert.deepEqual(a.calls.slice(-2).map(c => c.text), ['COMMIT', 'RELEASE']);
 });

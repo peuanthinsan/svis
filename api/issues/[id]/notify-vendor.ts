@@ -8,7 +8,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   const user = await verifyAuth(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
-  if (user.role === 'driver') return res.status(403).json({ error: 'Forbidden' });
+  if (user.role !== 'admin' && user.role !== 'supervisor') return res.status(403).json({ error: 'Forbidden' });
 
   const { id } = req.query;
   const sql = neon(process.env.DATABASE_URL!);

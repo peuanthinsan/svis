@@ -15,14 +15,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const drivers: string[] = [];
     const staff: string[] = [];
     const driverAccounts: Array<{ username: string; displayName: string; role: 'driver' }> = [];
-    const staffAccounts: Array<{ username: string; displayName: string; role: 'supervisor' | 'admin' }> = [];
+    const staffAccounts: Array<{ username: string; displayName: string; role: 'supervisor' | 'admin' | 'vehicle_owner' }> = [];
     for (const row of rows) {
       const name = String(row.name || '').trim();
       if (!name) continue;
       if (row.role === 'driver') {
         drivers.push(name);
         driverAccounts.push({ username: row.username as string, displayName: name, role: 'driver' });
-      } else if (row.role === 'supervisor' || row.role === 'admin') {
+      } else if (row.role === 'supervisor' || row.role === 'admin' || row.role === 'vehicle_owner') {
         staff.push(name);
         staffAccounts.push({ username: row.username as string, displayName: name, role: row.role });
       }

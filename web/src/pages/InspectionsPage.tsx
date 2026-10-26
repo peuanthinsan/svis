@@ -329,6 +329,7 @@ export function InspectionsPage() {
 
   if (!user) return <Navigate to="/login" replace />;
   if (!isDashboardUser) return <Navigate to="/login" replace />;
+  if (user.role === 'vehicle_owner') return <Navigate to="/history" replace />;
 
   function selectVehicle(vehicleId: string) {
     if (submitting) return;

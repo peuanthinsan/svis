@@ -58,6 +58,7 @@ async function request(user, vehicle = ownVehicle, method = 'PUT', query = {}, o
     return [];
   };
   const handler = loadModule(apiSource, {
+    '../lib/vehicle-access': { getOwnerVehicleIds: async () => null },
     '@neondatabase/serverless': { neon: () => sql },
     '../lib/api-auth': { verifyAuth: async () => user },
     '../lib/thai-date': { getTodayThai: () => '2026-10-06' },

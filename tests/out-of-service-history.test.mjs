@@ -49,8 +49,10 @@ function fixtureResult(text, values, fixtures) {
   assert.match(text, /COUNT\(\*\) FILTER \(WHERE overall_status = 'fail'\)::int AS failed/);
   assert.match(text, /json_agg\(paged ORDER BY inspection_date DESC, created_at DESC, id DESC\)/);
   assert.match(text, /FROM paged\), '\[\]'::json\) AS inspections\s+FROM filtered/);
-  assert.equal(values.length, 12);
-  const [company, vehicleCompany, fleet, fleetMatch, from, fromMatch, to, toMatch, search, pattern, limit, offset] = values;
+  assert.equal(values.length, 14);
+  const [company, ownerIds, ownerIdsMatch, vehicleCompany, fleet, fleetMatch, from, fromMatch, to, toMatch, search, pattern, limit, offset] = values;
+  assert.equal(ownerIds, null, 'existing operational-role scope is not replaced by owner grants');
+  assert.equal(ownerIdsMatch, null);
   assert.equal(company, vehicleCompany);
   assert.equal(fleet, fleetMatch);
   assert.equal(from, fromMatch);
@@ -98,6 +100,7 @@ async function request(query = {}, { user = supervisor, method = 'GET', fixtures
   const module = { exports: {} };
   new Function('require', 'module', 'exports', 'process', 'console', compiled)(
     (name) => {
+      if (name === '../lib/vehicle-access') return { getOwnerVehicleIds: async () => null };
       if (name === '@neondatabase/serverless') return { neon: () => { connections += 1; return sql; } };
       if (name === '../lib/api-auth') return { verifyAuth: async () => user };
       throw new Error(`Unexpected import: ${name}`);
@@ -119,7 +122,7 @@ test('Total includes an older current No while Today has no records, matching th
   assert.equal(total.res.body.passed, 0);
   assert.equal(total.res.body.inspections[0].id, 'old-no');
   assert.equal(total.calls.length, 1);
-  assert.deepEqual(total.calls[0].values.slice(4, 8), [null, null, null, null]);
+  assert.deepEqual(total.calls[0].values.slice(6, 10), [null, null, null, null]);
   const daily = await request({ outOfService: 'true', startDate: today, endDate: today });
   assert.equal(daily.res.statusCode, 200);
   assert.deepEqual(daily.res.body, { total: 0, passed: 0, failed: 0, inspections: [] });
@@ -157,7 +160,7 @@ test('JWT company and current fleet constrain membership, regardless of historic
   assert.equal(result.res.body.inspections[0].plate_number, 'PLATE-moved-in');
   assert.equal(result.res.body.inspections[0].vehicle_type, 'car');
   assert.ok(!('current_fleet_id' in result.res.body.inspections[0]));
-  assert.deepEqual(result.calls[0].values.slice(0, 4), ['company-one', 'company-one', 'fleet-alpha', 'fleet-alpha']);
+  assert.deepEqual(result.calls[0].values.slice(0, 6), ['company-one', null, null, 'company-one', 'fleet-alpha', 'fleet-alpha']);
 });
 
 test('Admins can view all current fleets or explicitly select one within their company', async () => {
@@ -165,7 +168,7 @@ test('Admins can view all current fleets or explicitly select one within their c
     inspections: [inspection('alpha-no', 'alpha', false), inspection('beta-no', 'beta', false)] };
   const all = await request({ outOfService: 'true' }, { user: admin, fixtures });
   assert.equal(all.res.body.total, 2);
-  assert.deepEqual(all.calls[0].values.slice(2, 4), [null, null]);
+  assert.deepEqual(all.calls[0].values.slice(4, 6), [null, null]);
   const beta = await request({ outOfService: 'true', fleetId: 'fleet-beta' }, { user: admin, fixtures });
   assert.equal(beta.res.body.total, 1);
   assert.equal(beta.res.body.inspections[0].id, 'beta-no');
@@ -201,7 +204,7 @@ test('Search and pagination preserve filtered counts and stable ordering across 
   assert.equal(first.res.body.inspections[0].id, 'c-no');
   assert.equal(next.res.body.total, 3);
   assert.equal(next.res.body.inspections[0].id, 'b-no');
-  assert.deepEqual(first.calls[0].values.slice(8), ['van', '%van%', 1, 0]);
+  assert.deepEqual(first.calls[0].values.slice(10), ['van', '%van%', 1, 0]);
   const beyond = await request({ outOfService: 'true', search: 'van', limit: '1', offset: '10' }, { fixtures });
   assert.equal(beyond.res.body.total, 3);
   assert.deepEqual(beyond.res.body.inspections, []);
@@ -212,10 +215,10 @@ test('Search remains a bound parameter, and limit/offset retain existing bounds'
   const result = await request({ outOfService: 'true', search, limit: '9999', offset: '-2' });
   assert.equal(result.res.statusCode, 200);
   assert.ok(!result.calls[0].text.includes(search));
-  assert.deepEqual(result.calls[0].values.slice(8), [search, `%${search}%`, 500, 0]);
+  assert.deepEqual(result.calls[0].values.slice(10), [search, `%${search}%`, 500, 0]);
   assert.equal(result.res.body.total, 0);
   const minimum = await request({ outOfService: 'true', limit: '-1', offset: 'bad' });
-  assert.deepEqual(minimum.calls[0].values.slice(10), [1, 0]);
+  assert.deepEqual(minimum.calls[0].values.slice(12), [1, 0]);
 });
 
 test('Partial, malformed, impossible and inverted ranges fail before opening SQL', async () => {
@@ -255,15 +258,15 @@ test('Normal history retains its two queries, historical fleet scope and respons
       inspections: [{ id: 'ordinary-history', fleet_id: 'historical-fleet' }] });
     assert.equal(result.calls.length, 2);
     const fleet = user.role === 'admin' ? 'fleet-beta' : 'fleet-alpha';
-    assert.match(result.calls[0].text, /AND il\.fleet_id = \?/);
-    assert.match(result.calls[1].text, /AND fleet_id = \?/);
-    assert.deepEqual(result.calls[0].values, [older, today, 'company-one', fleet, 'ABC', '%ABC%', 20, 2]);
-    assert.deepEqual(result.calls[1].values, [older, today, 'company-one', fleet, 'ABC', '%ABC%']);
+    assert.match(result.calls[0].text, /CASE WHEN \?::boolean THEN vm\.fleet_id ELSE il\.fleet_id END/);
+    assert.match(result.calls[1].text, /CASE WHEN \?::boolean THEN \(SELECT vm\.fleet_id[\s\S]*ELSE fleet_id END/);
+    assert.deepEqual(result.calls[0].values, [older, today, 'company-one', null, null, false, fleet, 'ABC', '%ABC%', 20, 2]);
+    assert.deepEqual(result.calls[1].values, [older, today, 'company-one', null, null, false, 'company-one', fleet, 'ABC', '%ABC%']);
     assert.ok(result.calls.every(({ text }) => !text.includes('latest_answered')));
   }
   const companyWide = await request({ startDate: older, endDate: today }, { user: admin });
-  assert.deepEqual(companyWide.calls[0].values, [older, today, 'company-one', null, '%%', 100, 0]);
-  assert.deepEqual(companyWide.calls[1].values, [older, today, 'company-one', null, '%%']);
+  assert.deepEqual(companyWide.calls[0].values, [older, today, 'company-one', null, null, null, '%%', 100, 0]);
+  assert.deepEqual(companyWide.calls[1].values, [older, today, 'company-one', null, null, null, '%%']);
 });
 
 test('Authentication, fleet fail-closed, method and query failures retain API safeguards', async () => {

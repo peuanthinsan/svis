@@ -27,7 +27,8 @@ function monthOptions(count = 12) {
 
 export default function DashboardExportForm() {
   const { t } = useI18n();
-  const { fleetId, isAdmin } = useRole();
+  const { fleetId: assignedFleetId, isAdmin, isVehicleOwner } = useRole();
+  const fleetId = isVehicleOwner ? '' : assignedFleetId;
   const [period, setPeriod] = useState<Period>('all');
   const [selectedFleets, setSelectedFleets] = useState<string[]>([]);
   const [fleetList, setFleetList] = useState<{ fleet_id: string }[]>([]);

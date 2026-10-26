@@ -12,5 +12,6 @@ export function useRole() {
     isDriver: role === 'driver',
     isSupervisor: role === 'supervisor',
     isAdmin: role === 'admin',
+    isVehicleOwner: role === 'vehicle_owner',
   };
 }
