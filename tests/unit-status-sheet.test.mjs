@@ -251,6 +251,7 @@ async function request(endpoint, user = admin, query = {}) {
     throw new Error(`Unexpected SQL: ${text}`);
   };
   const handler = loadModule(endpoint === 'dashboard' ? dashboardSource : unitStatusSource, {
+    '../lib/vehicle-access': { getOwnerVehicleIds: async () => null },
     '@neondatabase/serverless': { neon: () => sql },
     '../lib/api-auth': { verifyAuth: async () => user },
     '../lib/thai-date': { getTodayThai: () => '2026-10-09', getMondayOfWeekThai: () => '2026-10-05' },

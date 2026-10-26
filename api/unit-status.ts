@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
+import { getOwnerVehicleIds } from '../lib/vehicle-access';
 import { verifyAuth } from '../lib/api-auth';
 import { getTodayThai, getMondayOfWeekThai } from '../lib/thai-date';
 import { fetchSheetVehicles, recordVehicleActivity, type GpsStatus } from '../lib/unit-status-sheet';
@@ -35,13 +36,14 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const today = getTodayThai();
   const monday = getMondayOfWeekThai();
 
-  // Admins may select one fleet; every other role is locked to its JWT fleet.
-  // A missing non-admin fleet must fail closed rather than exposing company-wide data.
+  // Owners span only assigned vehicles. Operational non-admins remain fleet-bound.
   const isAdmin = user.role === 'admin';
-  const fleet: string | null = isAdmin ? ((req.query.fleetId as string) || null) : (user.fleetId || null);
-  if (!isAdmin && !fleet) return res.status(403).json({ error: 'Forbidden' });
+  const isOwner = user.role === 'vehicle_owner';
+  const fleet: string | null = (isAdmin || isOwner) ? ((req.query.fleetId as string) || null) : (user.fleetId || null);
+  if (!isAdmin && !isOwner && !fleet) return res.status(403).json({ error: 'Forbidden' });
 
   try {
+    const ownerVehicleIds = await getOwnerVehicleIds(sql, user);
     // Fetch GPS data and inspection completion (per frequency) in parallel.
     const [sheetVehicles, fleetVehicles, dailyRows, weeklyRows] = await Promise.all([
       fetchSheetVehicles(sql, user.companyId, { companySlug: user.companySlug }),
@@ -51,6 +53,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         SELECT plate_number, fleet_id
         FROM vehicle_master
         WHERE company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR id = ANY(${ownerVehicleIds}::uuid[]))
           AND (${fleet}::text IS NULL OR fleet_id = ${fleet})
           AND is_active
       `,
@@ -60,6 +63,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         JOIN vehicle_master v ON v.id = i.vehicle_id
         WHERE i.inspection_date = ${today}
           AND i.company_id = ${user.companyId}
+          AND v.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
           AND i.frequency IN ('daily', 'post_route')
           AND (${fleet}::text IS NULL OR v.fleet_id = ${fleet})
       `,
@@ -69,6 +74,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         JOIN vehicle_master v ON v.id = i.vehicle_id
         WHERE i.frequency = 'weekly'
           AND i.company_id = ${user.companyId}
+          AND v.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR v.id = ANY(${ownerVehicleIds}::uuid[]))
           AND i.inspection_date >= ${monday}
           AND i.inspection_date <= ${today}
           AND (${fleet}::text IS NULL OR v.fleet_id = ${fleet})
@@ -81,9 +88,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     // Remember which vehicles were GPS-online today (feeds the Active donut).
     // Awaited: a detached promise may be cut off when the serverless response ends.
-    await recordVehicleActivity(sql, sheetVehicles, today, user.companyId).catch((err) =>
-      console.warn('[unit-status] activity log upsert failed:', err.message),
-    );
+    if (!isOwner) {
+      await recordVehicleActivity(sql, sheetVehicles, today, user.companyId).catch((err) =>
+        console.warn('[unit-status] activity log upsert failed:', err.message),
+      );
+    }
 
     const preRoutePlates = new Set(
       dailyRows.filter((r: any) => r.frequency === 'daily').map((r: any) => r.plate_number as string),

@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
+import { getOwnerVehicleIds } from '../../lib/vehicle-access';
 import ExcelJS from 'exceljs';
 import { verifyAuth } from '../../lib/api-auth';
 import { brand, toArgb } from '../../branding';
@@ -53,18 +54,24 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
   try {
     // Build dynamic query using neon's parameterized form
-    const conditions: string[] = ['ir.company_id = $1'];
-    const params: (string | null)[] = [user.companyId];
+    const conditions: string[] = ['ir.company_id = $1', 'vm.company_id = $1'];
+    const params: (string | string[] | null)[] = [user.companyId];
+    const ownerVehicleIds = await getOwnerVehicleIds(sql, user);
+    if (ownerVehicleIds !== null) {
+      params.push(ownerVehicleIds);
+      conditions.push(`vm.id = ANY($${params.length}::uuid[])`);
+    }
 
     if (status) {
       params.push(status as string);
       conditions.push(`ir.status = $${params.length}`);
     }
     // Fleet scope is enforced here, not by RLS: non-admins can only export their own
-    // fleet regardless of any client-supplied fleetId; admins may pass a fleet filter.
+    // fleet regardless of requested filters. Owners can narrow their vehicle allowlist by fleet.
     const isAdmin = user.role === 'admin';
+    const isOwner = user.role === 'vehicle_owner';
     let effectiveFleetIds: string[] = [];
-    if (!isAdmin) {
+    if (!isAdmin && !isOwner) {
       if (!user.fleetId) return res.status(403).json({ error: 'Forbidden' });
       effectiveFleetIds = [user.fleetId];
     } else if (fleetId) {
@@ -97,7 +104,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         il.inspector_name, il.inspection_date
       FROM issue_reports ir
       JOIN vehicle_master vm ON vm.id = ir.vehicle_id
-      LEFT JOIN inspection_logs il ON il.id = ir.inspection_id
+      LEFT JOIN inspection_logs il ON il.id = ir.inspection_id AND il.company_id = ir.company_id AND il.vehicle_id = ir.vehicle_id
       ${where}
       ORDER BY ir.created_at DESC
       LIMIT 1000

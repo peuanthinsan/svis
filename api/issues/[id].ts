@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
+import { getOwnerVehicleIds } from '../../lib/vehicle-access';
 import { verifyAuth } from '../../lib/api-auth';
 import { logAudit } from '../../lib/audit';
 
@@ -12,30 +13,40 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  if (user.role === 'vehicle_owner' && req.method !== 'GET') {
+    return res.status(403).json({ error: 'Vehicle owners have read-only access' });
+  }
+
   const { id } = req.query;
   const sql = neon(process.env.DATABASE_URL!);
 
   if (req.method === 'GET') {
     try {
+      const ownerVehicleIds = await getOwnerVehicleIds(sql, user);
       const [issue] = await sql`
         SELECT ir.*, vm.plate_number, vm.vehicle_type, vm.fleet_id as vehicle_fleet,
           il.inspector_name, il.inspection_date
         FROM issue_reports ir
         JOIN vehicle_master vm ON vm.id = ir.vehicle_id
-        LEFT JOIN inspection_logs il ON il.id = ir.inspection_id
+        LEFT JOIN inspection_logs il ON il.id = ir.inspection_id AND il.company_id = ir.company_id AND il.vehicle_id = ir.vehicle_id
         WHERE ir.id = ${id as string} AND ir.company_id = ${user.companyId}
+          AND vm.company_id = ${user.companyId}
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR vm.id = ANY(${ownerVehicleIds}::uuid[]))
       `;
       if (!issue) return res.status(404).json({ error: 'Issue not found' });
       // Fleet scope is enforced here, not by RLS: a non-admin may only read an
       // issue for a vehicle in their own fleet (404, not 403, to avoid leaking existence).
-      if (user.role !== 'admin' && issue.vehicle_fleet !== user.fleetId) {
+      if (user.role !== 'admin' && user.role !== 'vehicle_owner' && issue.vehicle_fleet !== user.fleetId) {
         return res.status(404).json({ error: 'Issue not found' });
       }
       const failedPhotos = await sql`
         SELECT ARRAY_AGG(photo_url) AS defect_photo_urls
         FROM inspection_results ir
+        JOIN inspection_logs inspection ON inspection.id = ir.inspection_id
+          AND inspection.company_id = ${user.companyId}
         CROSS JOIN LATERAL unnest(ir.photo_urls) AS photo_url
         WHERE ir.inspection_id = ${issue.inspection_id}::uuid
+          AND (${ownerVehicleIds}::uuid[] IS NULL OR inspection.vehicle_id = ANY(${ownerVehicleIds}::uuid[]))
           AND ir.result = 'fail'
       `;
       if (failedPhotos[0]?.defect_photo_urls?.length) {

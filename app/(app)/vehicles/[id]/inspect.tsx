@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { useLocalSearchParams, useRouter, Stack } from 'expo-router';
+import { useLocalSearchParams, useRouter, Stack, Redirect } from 'expo-router';
 import { useAuth } from '../../../../lib/auth-context';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
@@ -39,6 +39,13 @@ const ZONE_ORDER: InspectionZone[] = ['front', 'cabin', 'cargo_supplies', 'exter
 const FREQUENCY_TABS: Frequency[] = ['daily', 'weekly', 'post_route'];
 
 export default function InspectScreen() {
+  const { isVehicleOwner } = useRole();
+  const { id } = useLocalSearchParams<{ id: string }>();
+  if (isVehicleOwner) return <Redirect href={{ pathname: '/(app)/vehicles/[id]', params: { id } }} />;
+  return <InspectForm />;
+}
+
+function InspectForm() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const { t, locale } = useI18n();

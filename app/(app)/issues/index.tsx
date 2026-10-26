@@ -86,7 +86,8 @@ function buildMonthOptions(count = 12) {
 
 export default function IssuesScreen() {
   const { t } = useI18n();
-  const { fleetId, isAdmin } = useRole();
+  const { fleetId: assignedFleetId, isAdmin, isVehicleOwner } = useRole();
+  const fleetId = isVehicleOwner ? '' : assignedFleetId;
   const router = useRouter();
   const [issues, setIssues] = useState<IssueWithVehicle[]>([]);
   const [loading, setLoading] = useState(true);

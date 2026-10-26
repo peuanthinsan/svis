@@ -1,5 +1,6 @@
 import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
+import { getOwnerVehicleIds } from '../../lib/vehicle-access';
 import { verifyAuth } from '../../lib/api-auth';
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
@@ -14,18 +15,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   const sql = neon(process.env.DATABASE_URL!);
 
   try {
+    const ownerVehicleIds = await getOwnerVehicleIds(sql, user);
     const [log] = await sql`
       SELECT il.*, vm.plate_number, vm.vehicle_type, vm.fleet_id as vehicle_fleet
       FROM inspection_logs il
       JOIN vehicle_master vm ON vm.id = il.vehicle_id
       WHERE il.id = ${id} AND il.company_id = ${user.companyId}
+        AND vm.company_id = ${user.companyId}
+        AND (${ownerVehicleIds}::uuid[] IS NULL OR vm.id = ANY(${ownerVehicleIds}::uuid[]))
     `;
     if (!log) return res.status(404).json({ error: 'Inspection not found' });
 
     // Fleet scope is enforced here, not by RLS (the DATABASE_URL role bypasses it):
     // a non-admin may only read an inspection for a vehicle in their own fleet.
     // 404 (not 403) so cross-fleet existence isn't confirmed.
-    if (user.role !== 'admin' && log.vehicle_fleet !== user.fleetId) {
+    if (user.role !== 'admin' && user.role !== 'vehicle_owner' && log.vehicle_fleet !== user.fleetId) {
       return res.status(404).json({ error: 'Inspection not found' });
     }
 

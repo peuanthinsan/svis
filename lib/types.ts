@@ -17,7 +17,7 @@ export type Company = {
 export type LoginAccount = {
   username: string;
   displayName: string;
-  role: 'driver' | 'supervisor' | 'admin';
+  role: 'driver' | 'supervisor' | 'admin' | 'vehicle_owner';
 };
 
 export const VEHICLE_TYPE_LABELS: Record<VehicleType, string> = {
@@ -52,6 +52,7 @@ export type Vehicle = {
   vehicle_type: VehicleType;
   fleet_id: string;
   fleet_manager_email: string | null;
+  is_active?: boolean;
 };
 
 export type ChecklistSection =
@@ -116,7 +117,7 @@ export type User = {
   username: string;
   first_name: string;
   last_name: string;
-  role: 'driver' | 'supervisor' | 'admin';
+  role: 'driver' | 'supervisor' | 'admin' | 'vehicle_owner';
   fleet_id: string;
   company_id: string;
   created_at: string;

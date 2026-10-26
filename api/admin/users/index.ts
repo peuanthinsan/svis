@@ -4,8 +4,9 @@ import bcrypt from 'bcryptjs';
 import { requireAdmin } from '../../../lib/admin-auth';
 import { BCRYPT_ROUNDS } from '../../../lib/api-auth';
 import { isNonEmptyString, MIN_PASSWORD_LENGTH } from '../../../lib/validate';
+import { ADMIN_USER_ROLES, createAccountWithVehicles, OwnerVehicleAssignmentError } from '../../../lib/owner-vehicle-assignment';
 
-const VALID_ROLES = ['driver', 'supervisor', 'admin'];
+const VALID_ROLES: readonly string[] = ADMIN_USER_ROLES;
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const admin = await requireAdmin(req, res);
@@ -68,9 +69,12 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   }
 
   if (req.method === 'POST') {
-    const { username, password, firstName, lastName, role, fleetId } = req.body;
+    const { username, password, firstName, lastName, role, fleetId, vehicleIds } = req.body || {};
+    const validLastName = role === 'vehicle_owner'
+      ? lastName === undefined || (typeof lastName === 'string' && lastName.length <= 100)
+      : isNonEmptyString(lastName, 100);
     if (!isNonEmptyString(username, 50) || !isNonEmptyString(password, 200) ||
-        !isNonEmptyString(firstName, 100) || !isNonEmptyString(lastName, 100) || !role) {
+        !isNonEmptyString(firstName, 100) || !validLastName || !role) {
       return res.status(400).json({ error: 'Missing required fields' });
     }
     if (password.length < MIN_PASSWORD_LENGTH) {
@@ -79,15 +83,19 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     if (!VALID_ROLES.includes(role)) {
       return res.status(400).json({ error: 'Invalid role' });
     }
+    if (fleetId !== undefined && (typeof fleetId !== 'string' || fleetId.length > 128)) {
+      return res.status(400).json({ error: 'Invalid fleet ID' });
+    }
     try {
       const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
-      const [user] = await sql`
-        INSERT INTO users (username, password_hash, first_name, last_name, role, fleet_id, company_id)
-        VALUES (${username}, ${passwordHash}, ${firstName}, ${lastName}, ${role}, ${fleetId || ''}, ${admin.companyId})
-        RETURNING id, username, first_name, last_name, role, fleet_id
-      `;
+      const user = await createAccountWithVehicles(sql, admin.companyId, {
+        username, passwordHash, firstName, lastName: lastName ?? '', role, fleetId, vehicleIds,
+      });
       return res.status(201).json(user);
     } catch (error: any) {
+      if (error instanceof OwnerVehicleAssignmentError) {
+        return res.status(error.status).json({ error: error.message });
+      }
       if (error.message?.includes('unique')) {
         return res.status(409).json({ error: 'Username already exists' });
       }

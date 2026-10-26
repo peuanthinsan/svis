@@ -34,6 +34,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   // Auth required
   const user = await verifyAuth(req);
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
+  if (user.role === 'vehicle_owner') return res.status(403).json({ error: 'Vehicle owners have read-only access' });
 
   try {
     const filename = sanitizeFilename((req.query.filename as string) || `photo-${Date.now()}.jpg`);

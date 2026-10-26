@@ -43,6 +43,7 @@ function loadIssuesHandler(sqlCalls) {
     throw new Error(`Unexpected SQL in test: ${text}`);
   };
   const fakeRequire = (specifier) => {
+    if (specifier === '../lib/vehicle-access') return { getOwnerVehicleIds: async () => null };
     if (specifier === '@neondatabase/serverless') return { neon: () => sql };
     if (specifier === '../lib/api-auth') {
       return {
@@ -133,7 +134,7 @@ test('issues API returns ordered failed checklist items with their own photos', 
   assert.match(evidenceQuery.text, /ir\.result = 'fail'/);
   assert.match(evidenceQuery.text, /ci\.company_id =/);
   assert.match(evidenceQuery.text, /ORDER BY ir\.sort_order, ir\.checklist_item_id/);
-  assert.deepEqual(evidenceQuery.values[0], ['inspection-1']);
+  assert.deepEqual(evidenceQuery.values.find(Array.isArray), ['inspection-1']);
   assert.ok(evidenceQuery.values.includes('company-1'));
 });
 

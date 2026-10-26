@@ -9,6 +9,7 @@ import { InspectionsPage } from './pages/InspectionsPage';
 import { LoginPage } from './pages/LoginPage';
 import { ChecklistPage } from './pages/ChecklistPage';
 import { ExportPage } from './pages/ExportPage';
+import { OwnerVehiclesPage } from './pages/OwnerVehiclesPage';
 
 export default function App() {
   return (
@@ -20,6 +21,7 @@ export default function App() {
             <Route index element={<DashboardPage />} />
             <Route path="export" element={<ExportPage />} />
             <Route path="inspections" element={<InspectionsPage />} />
+            <Route path="vehicles" element={<OwnerVehiclesPage />} />
             <Route path="issues" element={<IssuesPage />} />
             <Route path="history" element={<HistoryPage />} />
             <Route path="checklist" element={<ChecklistPage />} />

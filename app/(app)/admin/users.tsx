@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -20,7 +20,7 @@ import { useI18n } from '../../../lib/i18n-context';
 import { apiFetch } from '../../../lib/api';
 import { useDebounce } from '../../../lib/useDebounce';
 
-type Role = 'driver' | 'supervisor' | 'admin';
+type Role = 'driver' | 'supervisor' | 'admin' | 'vehicle_owner';
 
 type User = {
   id: string;
@@ -41,12 +41,21 @@ type FormState = {
   password: string;
 };
 
-const ROLES: Role[] = ['driver', 'supervisor', 'admin'];
+type OwnerVehicle = {
+  id: string;
+  plate_number: string;
+  fleet_id: string;
+  vehicle_type: string;
+  is_active?: boolean;
+};
+
+const ROLES: Role[] = ['driver', 'supervisor', 'admin', 'vehicle_owner'];
 
 const ROLE_COLORS: Record<string, { bg: string; text: string }> = {
   driver: { bg: colors.primary + '30', text: colors.textPrimary },
   supervisor: { bg: statusColors.pass.bg, text: statusColors.pass.text },
   admin: { bg: colors.accent + '20', text: colors.accent },
+  vehicle_owner: { bg: colors.primary + '15', text: colors.textPrimary },
 };
 
 const EMPTY_FORM: FormState = {
@@ -57,6 +66,61 @@ const EMPTY_FORM: FormState = {
   fleetId: '',
   password: '',
 };
+
+function isVehicleCatalog(value: unknown): value is OwnerVehicle[] {
+  return Array.isArray(value) && value.every((vehicle) => vehicle && typeof vehicle.id === 'string'
+    && typeof vehicle.plate_number === 'string' && typeof vehicle.fleet_id === 'string'
+    && typeof vehicle.vehicle_type === 'string');
+}
+
+/** Fetch every catalog page before allowing a new/converting owner's selection to be saved. */
+export async function loadMobileOwnerSelection(
+  user: Pick<User, 'id' | 'role'> | null,
+  fetcher: (path: string) => Promise<any> = apiFetch,
+  isCurrent: () => boolean = () => true,
+): Promise<{ vehicles: OwnerVehicle[]; selectedVehicleIds: string[] }> {
+  const assertCurrent = () => { if (!isCurrent()) throw new Error('Vehicle selection request superseded'); };
+  assertCurrent();
+  if (user?.role === 'vehicle_owner') {
+    const data = await fetcher(`/api/admin/users/${user.id}/vehicles`);
+    assertCurrent();
+    if (!data || !isVehicleCatalog(data.vehicles) || !Array.isArray(data.selectedVehicleIds)
+      || data.selectedVehicleIds.some((id: unknown) => typeof id !== 'string'
+        || !data.vehicles.some((vehicle: OwnerVehicle) => vehicle.id === id))) {
+      throw new Error('Invalid vehicle selection response');
+    }
+    return { vehicles: data.vehicles, selectedVehicleIds: [...new Set<string>(data.selectedVehicleIds)] };
+  }
+
+  const vehicles = new Map<string, OwnerVehicle>();
+  const pageSize = 500;
+  for (let offset = 0; ; offset += pageSize) {
+    assertCurrent();
+    const page = await fetcher(`/api/admin/vehicles?limit=${pageSize}&offset=${offset}`);
+    assertCurrent();
+    if (!isVehicleCatalog(page)) throw new Error('Invalid vehicle catalog response');
+    const previousSize = vehicles.size;
+    for (const vehicle of page) vehicles.set(vehicle.id, vehicle);
+    if (page.length < pageSize) break;
+    if (vehicles.size === previousSize) throw new Error('Vehicle catalog pagination did not advance');
+  }
+  return { vehicles: [...vehicles.values()], selectedVehicleIds: [] };
+}
+
+export function mobileOwnerSelectionCanSave(role: Role, ready: boolean, loading: boolean, error: string | null) {
+  return role !== 'vehicle_owner' || (ready && !loading && !error);
+}
+
+export function buildMobileUserPayload(form: FormState, selectedVehicleIds: string[], editing: boolean) {
+  const body: Record<string, string | string[]> = {
+    firstName: form.firstName.trim(), lastName: form.lastName.trim(), role: form.role,
+    fleetId: form.role === 'vehicle_owner' ? '' : form.fleetId.trim(),
+  };
+  if (!editing) body.username = form.username.trim();
+  if (!editing || form.password.trim()) body.password = form.password.trim();
+  if (form.role === 'vehicle_owner') body.vehicleIds = [...selectedVehicleIds];
+  return body;
+}
 
 export default function UsersManagementScreen() {
   const { t } = useI18n();
@@ -76,6 +140,45 @@ export default function UsersManagementScreen() {
   const [editingUser, setEditingUser] = useState<User | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [ownerVehicles, setOwnerVehicles] = useState<OwnerVehicle[]>([]);
+  const [selectedVehicleIds, setSelectedVehicleIds] = useState<string[]>([]);
+  const [ownerLoading, setOwnerLoading] = useState(false);
+  const [ownerReady, setOwnerReady] = useState(false);
+  const [ownerError, setOwnerError] = useState<string | null>(null);
+  const [ownerSearch, setOwnerSearch] = useState('');
+  const [ownerVisibleLimit, setOwnerVisibleLimit] = useState(100);
+  const ownerLoadGeneration = useRef(0);
+
+  const selectedVehicles = useMemo(() => new Set(selectedVehicleIds), [selectedVehicleIds]);
+  const filteredOwnerVehicles = useMemo(() => {
+    const query = ownerSearch.trim().toLowerCase();
+    return ownerVehicles.filter((vehicle) => `${vehicle.plate_number} ${vehicle.fleet_id}`.toLowerCase().includes(query));
+  }, [ownerVehicles, ownerSearch]);
+  const canSaveOwnerSelection = mobileOwnerSelectionCanSave(form.role, ownerReady, ownerLoading, ownerError);
+
+  const loadOwnerSelection = useCallback(async () => {
+    const generation = ++ownerLoadGeneration.current;
+    const isCurrent = () => ownerLoadGeneration.current === generation;
+    setOwnerLoading(true);
+    setOwnerReady(false);
+    setOwnerError(null);
+    try {
+      const selection = await loadMobileOwnerSelection(editingUser, apiFetch, isCurrent);
+      if (!isCurrent()) return;
+      setOwnerVehicles(selection.vehicles);
+      setSelectedVehicleIds(selection.selectedVehicleIds);
+      setOwnerReady(true);
+    } catch {
+      if (isCurrent()) setOwnerError(t('owner.loadFailed'));
+    } finally {
+      if (isCurrent()) setOwnerLoading(false);
+    }
+  }, [editingUser?.id, editingUser?.role, t]);
+
+  useEffect(() => {
+    if (modalVisible && form.role === 'vehicle_owner') void loadOwnerSelection();
+    return () => { ownerLoadGeneration.current += 1; };
+  }, [modalVisible, form.role, loadOwnerSelection]);
 
   const PAGE_LIMIT = 100;
 
@@ -131,13 +234,26 @@ export default function UsersManagementScreen() {
     fetchUsers(false);
   };
 
+  const resetOwnerSelection = () => {
+    ownerLoadGeneration.current += 1;
+    setOwnerVehicles([]);
+    setSelectedVehicleIds([]);
+    setOwnerReady(false);
+    setOwnerLoading(false);
+    setOwnerError(null);
+    setOwnerSearch('');
+    setOwnerVisibleLimit(100);
+  };
+
   const openAdd = () => {
+    resetOwnerSelection();
     setEditingUser(null);
     setForm(EMPTY_FORM);
     setModalVisible(true);
   };
 
   const openEdit = (user: User) => {
+    resetOwnerSelection();
     setEditingUser(user);
     setForm({
       username: user.username,
@@ -151,15 +267,18 @@ export default function UsersManagementScreen() {
   };
 
   const closeModal = () => {
+    resetOwnerSelection();
     setModalVisible(false);
     setEditingUser(null);
     setForm(EMPTY_FORM);
   };
 
   const handleSave = async () => {
-    const { username, firstName, lastName, role, fleetId, password } = form;
+    const { username, firstName, lastName, role, password } = form;
 
-    if (!firstName.trim() || !lastName.trim() || !role) {
+    if (saving || !canSaveOwnerSelection) return;
+
+    if (!firstName.trim() || (role !== 'vehicle_owner' && !lastName.trim()) || !role) {
       Alert.alert(t('general.error'), t('admin.requiredUserDetails'));
       return;
     }
@@ -170,14 +289,8 @@ export default function UsersManagementScreen() {
 
     setSaving(true);
     try {
+      const body = buildMobileUserPayload(form, selectedVehicleIds, Boolean(editingUser));
       if (editingUser) {
-        const body: Record<string, string | undefined> = {
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
-          role,
-          fleetId: fleetId.trim() || undefined,
-        };
-        if (password.trim()) body.password = password.trim();
         const updated = await apiFetch(`/api/admin/users/${editingUser.id}`, {
           method: 'PUT',
           body: JSON.stringify(body),
@@ -188,14 +301,7 @@ export default function UsersManagementScreen() {
       } else {
         const created = await apiFetch('/api/admin/users', {
           method: 'POST',
-          body: JSON.stringify({
-            username: username.trim(),
-            password: password.trim(),
-            firstName: firstName.trim(),
-            lastName: lastName.trim(),
-            role,
-            fleetId: fleetId.trim() || '',
-          }),
+          body: JSON.stringify(body),
         });
         setUsers((prev) => [created, ...prev]);
         closeModal();
@@ -260,7 +366,7 @@ export default function UsersManagementScreen() {
         {/* Role badge */}
         <View style={[styles.roleBadge, { backgroundColor: roleStyle.bg }]}>
           <Text style={[styles.roleText, { color: roleStyle.text }]}>
-            {item.role}
+            {item.role === 'vehicle_owner' ? t('profile.vehicleOwner') : item.role}
           </Text>
         </View>
 
@@ -353,7 +459,7 @@ export default function UsersManagementScreen() {
         transparent
         statusBarTranslucent
         animationType="fade"
-        onRequestClose={closeModal}
+        onRequestClose={() => { if (!saving) closeModal(); }}
       >
         <KeyboardAvoidingView
           style={styles.modalOverlay}
@@ -365,12 +471,12 @@ export default function UsersManagementScreen() {
               <Text style={styles.modalTitle}>
                 {editingUser ? t('admin.users.edit') : t('admin.users.add')}
               </Text>
-              <TouchableOpacity onPress={closeModal} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <TouchableOpacity onPress={closeModal} disabled={saving} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                 <Ionicons name="close" size={22} color={colors.textSecondary} />
               </TouchableOpacity>
             </View>
 
-            <ScrollView showsVerticalScrollIndicator={false}>
+            <ScrollView showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
               {/* Username — only on create */}
               {!editingUser && (
                 <>
@@ -388,22 +494,22 @@ export default function UsersManagementScreen() {
               )}
 
               {/* First name */}
-              <Text style={styles.fieldLabel}>{t('admin.users.firstName')}</Text>
+              <Text style={styles.fieldLabel}>{t(form.role === 'vehicle_owner' ? 'owner.customerName' : 'admin.users.firstName')}</Text>
               <TextInput
                 style={styles.textInput}
                 value={form.firstName}
                 onChangeText={(v) => setForm((f) => ({ ...f, firstName: v }))}
-                placeholder={t('admin.users.firstName')}
+                placeholder={t(form.role === 'vehicle_owner' ? 'owner.customerName' : 'admin.users.firstName')}
                 placeholderTextColor={colors.textTertiary}
               />
 
               {/* Last name */}
-              <Text style={styles.fieldLabel}>{t('admin.users.lastName')}</Text>
+              <Text style={styles.fieldLabel}>{t(form.role === 'vehicle_owner' ? 'owner.optionalLastName' : 'admin.users.lastName')}</Text>
               <TextInput
                 style={styles.textInput}
                 value={form.lastName}
                 onChangeText={(v) => setForm((f) => ({ ...f, lastName: v }))}
-                placeholder={t('admin.users.lastName')}
+                placeholder={t(form.role === 'vehicle_owner' ? 'owner.optionalLastName' : 'admin.users.lastName')}
                 placeholderTextColor={colors.textTertiary}
               />
 
@@ -416,28 +522,99 @@ export default function UsersManagementScreen() {
                     <TouchableOpacity
                       key={r}
                       style={[styles.roleChip, active && styles.roleChipActive]}
-                      onPress={() => setForm((f) => ({ ...f, role: r }))}
+                      onPress={() => {
+                        if (r === 'vehicle_owner' && form.role !== r) setOwnerReady(false);
+                        setForm((f) => ({ ...f, role: r }));
+                      }}
+                      disabled={saving}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: active, disabled: saving }}
                       activeOpacity={0.75}
                     >
                       <Text style={[styles.roleChipText, active && styles.roleChipTextActive]}>
-                        {r.charAt(0).toUpperCase() + r.slice(1)}
+                        {r === 'vehicle_owner' ? t('profile.vehicleOwner') : r.charAt(0).toUpperCase() + r.slice(1)}
                       </Text>
                     </TouchableOpacity>
                   );
                 })}
               </View>
 
-              {/* Fleet ID */}
-              <Text style={styles.fieldLabel}>{t('admin.users.fleet')}</Text>
-              <TextInput
-                style={styles.textInput}
-                value={form.fleetId}
-                onChangeText={(v) => setForm((f) => ({ ...f, fleetId: v }))}
-                placeholder="e.g. BKK01"
-                placeholderTextColor={colors.textTertiary}
-                autoCapitalize="characters"
-                autoCorrect={false}
-              />
+              {form.role === 'vehicle_owner' ? (
+                <View style={styles.ownerSection}>
+                  <Text style={styles.fieldLabel}>{t('owner.assignedVehicles')}</Text>
+                  <Text style={styles.ownerHint}>{t('owner.readOnly')} {t('owner.fleetUnchanged')}</Text>
+                  {ownerLoading ? <ActivityIndicator style={styles.ownerLoader} color={colors.primary} /> : null}
+                  {ownerError ? (
+                    <View>
+                      <Text style={styles.errorText}>{ownerError}</Text>
+                      <TouchableOpacity style={styles.retryButton} onPress={() => void loadOwnerSelection()} disabled={saving}>
+                        <Text style={styles.retryText}>{t('general.retry')}</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ) : null}
+                  {ownerReady && !ownerLoading && !ownerError ? (
+                    <>
+                      <Text style={styles.ownerCount}>{t('owner.selectedCount').replace('{count}', String(selectedVehicleIds.length))}</Text>
+                      <TextInput
+                        style={styles.textInput}
+                        value={ownerSearch}
+                        onChangeText={(value) => { setOwnerSearch(value); setOwnerVisibleLimit(100); }}
+                        placeholder={t('owner.searchVehicles')}
+                        placeholderTextColor={colors.textTertiary}
+                        accessibilityLabel={t('owner.searchVehicles')}
+                        autoCorrect={false}
+                        autoCapitalize="none"
+                      />
+                      <ScrollView style={styles.ownerList} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+                        {filteredOwnerVehicles.slice(0, ownerVisibleLimit).map((vehicle) => {
+                          const selected = selectedVehicles.has(vehicle.id);
+                          return (
+                            <TouchableOpacity
+                              key={vehicle.id}
+                              style={styles.ownerVehicle}
+                              accessibilityRole="checkbox"
+                              accessibilityState={{ checked: selected, disabled: saving }}
+                              accessibilityLabel={`${vehicle.plate_number}, ${vehicle.fleet_id}`}
+                              disabled={saving}
+                              onPress={() => setSelectedVehicleIds((previous) => previous.includes(vehicle.id)
+                                ? previous.filter((id) => id !== vehicle.id) : [...previous, vehicle.id])}
+                            >
+                              <Ionicons name={selected ? 'checkbox' : 'square-outline'} size={24} color={selected ? colors.textPrimary : colors.textTertiary} />
+                              <View style={styles.ownerVehicleInfo}>
+                                <Text style={styles.ownerPlate}>{vehicle.plate_number}</Text>
+                                <Text style={styles.ownerHint}>{vehicle.fleet_id} · {vehicle.vehicle_type}{vehicle.is_active === false ? ` · ${t('owner.inactiveVehicle')}` : ''}</Text>
+                              </View>
+                            </TouchableOpacity>
+                          );
+                        })}
+                        {!filteredOwnerVehicles.length ? <Text style={styles.ownerHint}>{t('admin.noResults')}</Text> : null}
+                        {filteredOwnerVehicles.length > ownerVisibleLimit ? (
+                          <TouchableOpacity style={styles.ownerMore} onPress={() => setOwnerVisibleLimit((count) => count + 100)}>
+                            <Text style={styles.ownerPlate}>{t('admin.users.loadMore')}</Text>
+                          </TouchableOpacity>
+                        ) : null}
+                      </ScrollView>
+                      <Text style={styles.ownerHint}>{t('owner.showingVehicles')
+                        .replace('{shown}', String(Math.min(filteredOwnerVehicles.length, ownerVisibleLimit)))
+                        .replace('{total}', String(filteredOwnerVehicles.length))}</Text>
+                      {!selectedVehicleIds.length ? <Text style={styles.ownerEmpty}>{t('owner.noSelection')}</Text> : null}
+                    </>
+                  ) : null}
+                </View>
+              ) : (
+                <>
+                  <Text style={styles.fieldLabel}>{t('admin.users.fleet')}</Text>
+                  <TextInput
+                    style={styles.textInput}
+                    value={form.fleetId}
+                    onChangeText={(v) => setForm((f) => ({ ...f, fleetId: v }))}
+                    placeholder="e.g. BKK01"
+                    placeholderTextColor={colors.textTertiary}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                  />
+                </>
+              )}
 
               {/* Password */}
               <Text style={styles.fieldLabel}>
@@ -466,10 +643,10 @@ export default function UsersManagementScreen() {
                 <Text style={styles.cancelText}>{t('admin.cancel')}</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={[styles.saveButton, saving && styles.saveButtonDisabled]}
+                style={[styles.saveButton, (saving || !canSaveOwnerSelection) && styles.saveButtonDisabled]}
                 onPress={handleSave}
                 activeOpacity={0.8}
-                disabled={saving}
+                disabled={saving || !canSaveOwnerSelection}
               >
                 {saving ? (
                   <ActivityIndicator size="small" color={colors.onPrimary} />
@@ -682,11 +859,14 @@ const styles = StyleSheet.create({
   // Role picker row
   roleRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: spacing.sm,
     marginBottom: spacing.md,
   },
   roleChip: {
-    flex: 1,
+    flexGrow: 1,
+    flexBasis: '45%',
+    paddingHorizontal: spacing.sm,
     paddingVertical: spacing.sm + 2,
     borderRadius: borderRadius.sm,
     borderWidth: 1.5,
@@ -705,6 +885,16 @@ const styles = StyleSheet.create({
   roleChipTextActive: {
     color: colors.onPrimary,
   },
+  ownerSection: { marginBottom: spacing.md },
+  ownerHint: { fontSize: 12, color: colors.textSecondary, lineHeight: 18 },
+  ownerCount: { fontSize: 13, fontWeight: '600', color: colors.textPrimary, marginVertical: spacing.sm },
+  ownerLoader: { marginVertical: spacing.md },
+  ownerList: { maxHeight: 260, borderWidth: 1, borderColor: colors.border, borderRadius: borderRadius.sm, marginBottom: spacing.xs },
+  ownerVehicle: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.sm, minHeight: 52, borderBottomWidth: 1, borderBottomColor: colors.border },
+  ownerVehicleInfo: { flex: 1 },
+  ownerPlate: { fontSize: 14, fontWeight: '600', color: colors.textPrimary },
+  ownerMore: { padding: spacing.md, alignItems: 'center' },
+  ownerEmpty: { fontSize: 12, color: colors.accent, marginTop: spacing.sm },
   // Actions
   modalActions: {
     flexDirection: 'row',

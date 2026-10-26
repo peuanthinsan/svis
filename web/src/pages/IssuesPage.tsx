@@ -20,12 +20,13 @@ function statusLabel(status: string) {
   return status;
 }
 
-function IssueModal({ issue, onClose, onStartRepair, onCompleteRepair, updating }: {
+function IssueModal({ issue, onClose, onStartRepair, onCompleteRepair, updating, readOnly }: {
   issue: IssueRow;
   onClose: () => void;
   onStartRepair: () => void;
   onCompleteRepair: (file: File) => void;
   updating: boolean;
+  readOnly: boolean;
 }) {
   const lang = getLang();
   const { mappedItems: mappedDefectItems, unassociatedUrls: unassociatedDefectUrls } = partitionFailedChecklistPhotos(
@@ -79,7 +80,7 @@ function IssueModal({ issue, onClose, onStartRepair, onCompleteRepair, updating 
           </div>
         )}
 
-        {issue.status !== 'completed' && (
+        {!readOnly && issue.status !== 'completed' && (
           <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
             {issue.status === 'open' && (
               <button type="button" className="btn btn--secondary" onClick={onStartRepair} disabled={updating}>
@@ -126,7 +127,8 @@ export function IssuesPage() {
   const [selected, setSelected] = useState<IssueRow | null>(null);
   const [updating, setUpdating] = useState(false);
 
-  const fleetScope = user?.role === 'admin' ? undefined : user?.fleetId;
+  const readOnly = user?.role === 'vehicle_owner';
+  const fleetScope = user?.role === 'admin' || readOnly ? undefined : user?.fleetId;
 
   useEffect(() => {
     let cancelled = false;
@@ -150,7 +152,7 @@ export function IssuesPage() {
   }
 
   async function startRepair() {
-    if (!selected) return;
+    if (!selected || readOnly) return;
     setUpdating(true);
     try {
       await updateIssueStatus(selected.id, 'in_progress');
@@ -163,7 +165,7 @@ export function IssuesPage() {
   }
 
   async function completeRepair(file: File) {
-    if (!selected) return;
+    if (!selected || readOnly) return;
     setUpdating(true);
     try {
       const { url } = await uploadInspectionPhoto(file);
@@ -246,7 +248,7 @@ export function IssuesPage() {
         )}
       </div>
 
-      {selected && <IssueModal issue={selected} onClose={() => setSelected(null)} onStartRepair={() => void startRepair()} onCompleteRepair={(file) => void completeRepair(file)} updating={updating} />}
+      {selected && <IssueModal issue={selected} onClose={() => setSelected(null)} onStartRepair={() => void startRepair()} onCompleteRepair={(file) => void completeRepair(file)} updating={updating} readOnly={readOnly} />}
     </div>
   );
 }

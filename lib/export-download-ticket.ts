@@ -16,6 +16,8 @@ export type ExportScope = {
   userId: string;
   companyId: string;
   fleetIds: string[];
+  // Undefined means legacy role/fleet scope. An empty list grants no vehicles.
+  vehicleIds?: string[];
   dateStart?: string;
   dateEnd?: string;
 };
@@ -58,7 +60,7 @@ export function resolveExportScope(user: AuthUser, input: unknown): ExportScope 
     throw new ExportRequestError(400, 'Invalid export filters');
   }
   if (!UUID.test(user.userId) || !UUID.test(user.companyId)
-    || !['admin', 'supervisor', 'driver'].includes(user.role)) {
+    || !['admin', 'supervisor', 'driver', 'vehicle_owner'].includes(user.role)) {
     throw new ExportRequestError(401, 'Unauthorized');
   }
   const fields = input as Record<string, unknown>;
@@ -70,7 +72,7 @@ export function resolveExportScope(user: AuthUser, input: unknown): ExportScope 
   if (fleetIds.length > 100 || fleetIds.some((id) => !validFleet(id))) {
     throw new ExportRequestError(400, 'Invalid fleet filters');
   }
-  if (user.role !== 'admin') {
+  if (user.role !== 'admin' && user.role !== 'vehicle_owner') {
     if (typeof user.fleetId !== 'string' || !validFleet(user.fleetId) || !user.fleetId.trim()) {
       throw new ExportRequestError(403, 'A fleet assignment is required to export reports');
     }
@@ -82,7 +84,10 @@ export function resolveExportScope(user: AuthUser, input: unknown): ExportScope 
   if (dateStart && dateEnd && dateStart > dateEnd) {
     throw new ExportRequestError(400, 'dateStart must not be after dateEnd');
   }
-  return { userId: user.userId, companyId: user.companyId, fleetIds, dateStart, dateEnd };
+  return {
+    userId: user.userId, companyId: user.companyId, fleetIds, dateStart, dateEnd,
+    ...(user.role === 'vehicle_owner' ? { vehicleIds: [] } : {}),
+  };
 }
 
 function signature(value: string, sessionSecret: string): Buffer {
@@ -148,24 +153,24 @@ export async function issueExportTicket(
   const ticket = signExportTicket(sessionSecret, now);
   // Serialize issuance per user. The subsequent statements receive fresh
   // READ COMMITTED snapshots, so concurrent issuers cannot exceed the cap.
-  const [, owners, , inserted] = await sql.transaction([
-    sql.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED', []),
+  const [owners, , inserted] = await sql.transaction([
     sql.query('SELECT id FROM users WHERE id = $1::uuid AND company_id = $2::uuid FOR UPDATE',
       [scope.userId, scope.companyId]),
     sql.query(`DELETE FROM export_download_tickets
       WHERE user_id = $1::uuid AND company_id = $2::uuid AND expires_at <= CURRENT_TIMESTAMP`,
     [scope.userId, scope.companyId]),
     sql.query(`INSERT INTO export_download_tickets
-      (token_hash, user_id, company_id, fleet_ids, date_start, date_end, expires_at)
-      SELECT $1, $2::uuid, $3::uuid, $4::text[], $5::date, $6::date, $7::timestamptz
+      (token_hash, user_id, company_id, fleet_ids, date_start, date_end, expires_at, vehicle_ids)
+      SELECT $1, $2::uuid, $3::uuid, $4::text[], $5::date, $6::date, $7::timestamptz, $8::uuid[]
       WHERE EXISTS (SELECT 1 FROM users WHERE id = $2::uuid AND company_id = $3::uuid)
         AND (SELECT COUNT(*) FROM export_download_tickets
              WHERE user_id = $2::uuid AND company_id = $3::uuid
-               AND expires_at > CURRENT_TIMESTAMP) < $8
+               AND expires_at > CURRENT_TIMESTAMP) < $9
       RETURNING token_hash`,
     [ticket.tokenHash, scope.userId, scope.companyId, scope.fleetIds,
-      scope.dateStart ?? null, scope.dateEnd ?? null, ticket.expiresAt, MAX_OUTSTANDING_EXPORT_TICKETS]),
-  ]);
+      scope.dateStart ?? null, scope.dateEnd ?? null, ticket.expiresAt,
+      scope.vehicleIds ?? null, MAX_OUTSTANDING_EXPORT_TICKETS]),
+  ], { isolationLevel: 'ReadCommitted' });
   if (owners.length === 0) throw new ExportRequestError(401, 'Unauthorized');
   if (inserted.length === 0) {
     throw new ExportRequestError(429, 'Too many pending export downloads. Use an existing link or try again in five minutes.');
@@ -182,20 +187,46 @@ export async function redeemExportTicket(
   const tokenHash = verifyExportTicket(token, sessionSecret, now);
   // A single atomic statement permits exactly one concurrent GET to redeem.
   // An aborted generation/transfer needs a new ticket; HEAD never reaches here.
-  const rows = await sql.query(`DELETE FROM export_download_tickets
-    WHERE token_hash = $1 AND expires_at > CURRENT_TIMESTAMP
-    RETURNING user_id::text AS user_id, company_id::text AS company_id,
-              fleet_ids, date_start::text AS date_start, date_end::text AS date_end`, [tokenHash]);
+  const rows = await sql.query(`DELETE FROM export_download_tickets t
+    USING users u, companies c
+    WHERE t.token_hash = $1 AND t.expires_at > CURRENT_TIMESTAMP
+      AND u.id = t.user_id AND u.company_id = t.company_id AND u.is_active
+      AND c.id = u.company_id AND c.is_active
+    RETURNING t.user_id::text AS user_id, t.company_id::text AS company_id,
+              t.fleet_ids, t.vehicle_ids, t.date_start::text AS date_start, t.date_end::text AS date_end,
+              u.role AS current_role, u.fleet_id AS current_fleet_id`, [tokenHash]);
   if (rows.length !== 1) throw invalidTicket();
   const row = rows[0];
   if (!UUID.test(row.user_id) || !UUID.test(row.company_id) || !Array.isArray(row.fleet_ids)
-    || row.fleet_ids.length > 100 || row.fleet_ids.some((id: unknown) => typeof id !== 'string' || !validFleet(id))) {
+    || row.fleet_ids.length > 100 || row.fleet_ids.some((id: unknown) => typeof id !== 'string' || !validFleet(id))
+    || !['admin', 'supervisor', 'driver', 'vehicle_owner'].includes(row.current_role)
+    || (row.vehicle_ids != null && (!Array.isArray(row.vehicle_ids)
+      || row.vehicle_ids.some((id: unknown) => typeof id !== 'string' || !UUID.test(id))))) {
     throw invalidTicket();
+  }
+  let fleetIds: string[] = row.fleet_ids;
+  let vehicleIds: string[] | undefined = row.vehicle_ids ?? undefined;
+  if (row.current_role === 'vehicle_owner') {
+    // Revoking a checkbox must also revoke unused links issued before the edit.
+    // Intersect the immutable ticket snapshot with current grants: additions
+    // never expand a previously issued owner ticket.
+    const grants = await sql.query(`SELECT a.vehicle_id::text AS vehicle_id
+      FROM user_vehicle_access a
+      JOIN vehicle_master v ON v.id = a.vehicle_id AND v.company_id = a.company_id
+      WHERE a.user_id = $1::uuid AND a.company_id = $2::uuid`, [row.user_id, row.company_id]);
+    const current = new Set(grants.map((grant) => grant.vehicle_id as string));
+    vehicleIds = vehicleIds === undefined ? [...current] : vehicleIds.filter((id) => current.has(id));
+  } else if (row.current_role !== 'admin') {
+    if (typeof row.current_fleet_id !== 'string' || !validFleet(row.current_fleet_id)
+      || !row.current_fleet_id.trim()
+      || (fleetIds.length > 0 && !fleetIds.includes(row.current_fleet_id))) throw invalidTicket();
+    fleetIds = [row.current_fleet_id];
   }
   return {
     userId: row.user_id,
     companyId: row.company_id,
-    fleetIds: row.fleet_ids,
+    fleetIds,
+    ...(vehicleIds === undefined ? {} : { vehicleIds }),
     dateStart: row.date_start ?? undefined,
     dateEnd: row.date_end ?? undefined,
   };

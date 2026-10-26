@@ -2,8 +2,9 @@ import type { VercelRequest, VercelResponse } from '@vercel/node';
 import { neon } from '@neondatabase/serverless';
 import ExcelJS from 'exceljs';
 import { requireAdmin } from '../../../lib/admin-auth';
+import { ADMIN_USER_ROLES } from '../../../lib/owner-vehicle-assignment';
 
-const VALID_ROLES = new Set(['driver', 'supervisor', 'admin']);
+const VALID_ROLES = new Set<string>(ADMIN_USER_ROLES);
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   const admin = await requireAdmin(req, res);

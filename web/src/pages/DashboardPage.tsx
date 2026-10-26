@@ -440,7 +440,8 @@ function StatusDonutCard({
 
 export function DashboardPage() {
   const { user, isDashboardUser } = useAuth();
-  const isAdmin = user?.role === 'admin';
+  const canFilterFleets = user?.role === 'admin' || user?.role === 'vehicle_owner';
+  const readOnly = user?.role === 'vehicle_owner';
   const [data, setData] = useState<DashboardData | null>(null);
   const [maintData, setMaintData] = useState<MaintenanceData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -450,7 +451,7 @@ export function DashboardPage() {
   const [notifyingId, setNotifyingId] = useState<string | null>(null);
   const [notifiedIds, setNotifiedIds] = useState<Record<string, string>>({});
 
-  const fleetScope = isAdmin ? selectedFleet : user?.fleetId;
+  const fleetScope = canFilterFleets ? selectedFleet : user?.fleetId;
 
   // Monotonic guard so only the latest load() applies its results: drops out-of-order
   // 60s-poll/fleet-switch responses and post-unmount state writes (last-resolved-wins bug).
@@ -468,8 +469,8 @@ export function DashboardPage() {
       const result = await fetchDashboard(fleetScope, controller.signal);
       if (loadGenRef.current !== myGen) return;
       setData(result);
-      // Capture the full fleet list from an unscoped admin load to populate the filter dropdown.
-      if (isAdmin && !fleetScope) {
+      // The backend restricts owners to fleets containing their assigned vehicles.
+      if (canFilterFleets && !fleetScope) {
         setAllFleets(result.fleets.map((f) => f.fleetId));
       }
       // The core metrics and GPS table are coherent in `result`; do not make the
@@ -486,7 +487,7 @@ export function DashboardPage() {
     } finally {
       if (loadGenRef.current === myGen) setLoading(false);
     }
-  }, [fleetScope, isAdmin]);
+  }, [fleetScope, canFilterFleets]);
 
   useEffect(() => {
     load();
@@ -502,6 +503,7 @@ export function DashboardPage() {
   if (!isDashboardUser) return <Navigate to="/login" replace />;
 
   async function onNotifyVendor(v: DefectVehicle) {
+    if (readOnly) return;
     setNotifyingId(v.issueId);
     try {
       const res = await notifyVendor(v.issueId);
@@ -539,9 +541,10 @@ export function DashboardPage() {
         <div>
           <h1>{t('greeting', { name: user.firstName })}</h1>
           <p className="muted">{t('today')} {formatDateThai(data.date)}</p>
+          {readOnly && <p className="muted">{t('ownerViewHelp')}</p>}
         </div>
         <div className="header-actions">
-          {isAdmin && (
+          {canFilterFleets && (
             <select
               className="fleet-select"
               value={selectedFleet ?? ''}
@@ -618,7 +621,7 @@ export function DashboardPage() {
                     <span>{v.plate} · {v.fleetId}</span>
                     <div className="defect-row__actions">
                       <span className="muted">{t(v.status === 'in_progress' ? 'inProgress' : 'open')} · {v.ageDays}d</span>
-                      {alreadyNotified ? (
+                      {!readOnly && (alreadyNotified ? (
                         <span className="tag tag--success">{t('notifyVendorSent')}</span>
                       ) : v.hasVendorEmail ? (
                         <button type="button" className="btn btn--sm btn--secondary" disabled={isNotifying} onClick={() => onNotifyVendor(v)}>
@@ -626,7 +629,7 @@ export function DashboardPage() {
                         </button>
                       ) : (
                         <span className="tag">{t('notifyVendorNoEmail')}</span>
-                      )}
+                      ))}
                     </div>
                   </div>
                 );

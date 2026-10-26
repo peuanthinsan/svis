@@ -35,6 +35,7 @@ function loadInspectionHandler(sqlCalls) {
     throw new Error(`Unexpected SQL in test: ${text}`);
   };
   const fakeRequire = (specifier) => {
+    if (specifier === '../lib/vehicle-access') return { getOwnerVehicleIds: async () => null };
     if (specifier === '@neondatabase/serverless') return { neon: () => sql };
     if (specifier === '../lib/api-auth') {
       return {

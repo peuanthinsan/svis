@@ -1,4 +1,4 @@
-import { getToken } from './auth';
+import { getToken, type Role } from './auth';
 import type { FailedChecklistItem } from './issue-checklist';
 
 export class ApiError extends Error {
@@ -43,7 +43,7 @@ export type LoginResponse = {
     username: string;
     firstName: string;
     lastName: string;
-    role: 'driver' | 'supervisor' | 'admin';
+    role: Role;
     fleetId: string;
     companyId: string;
     companySlug: string;
@@ -56,7 +56,7 @@ export type LoginResponse = {
 export type LoginAccount = {
   username: string;
   displayName: string;
-  role: 'driver' | 'supervisor' | 'admin';
+  role: Role;
 };
 
 export function fetchLoginUsers(companySlug: string) {
@@ -255,6 +255,7 @@ export type InspectionVehicle = {
   plate_number: string;
   vehicle_type: VehicleTypeKey;
   fleet_id: string;
+  is_active?: boolean;
   daily_status: 'checked' | 'pending';
   daily_result?: 'pass' | 'fail' | null;
   daily_checked_by?: string | null;
@@ -543,7 +544,7 @@ export type AdminUser = {
   username: string;
   first_name: string;
   last_name: string;
-  role: 'driver' | 'supervisor' | 'admin';
+  role: Role;
   fleet_id?: string;
   created_at: string;
 };
@@ -619,12 +620,19 @@ export function createAdminUser(data: {
   lastName: string;
   role: string;
   fleetId?: string;
+  vehicleIds?: string[];
 }) {
   return apiFetch<AdminUser>('/api/admin/users', { method: 'POST', body: JSON.stringify(data) });
 }
 
-export function updateAdminUser(id: string, data: { password?: string; firstName?: string; lastName?: string; role?: string; fleetId?: string }) {
+export function updateAdminUser(id: string, data: { password?: string; firstName?: string; lastName?: string; role?: string; fleetId?: string; vehicleIds?: string[] }) {
   return apiFetch<AdminUser>(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify(data) });
+}
+
+export type OwnerVehicleOption = Pick<AdminVehicle, 'id' | 'plate_number' | 'vehicle_type' | 'fleet_id'>;
+
+export function fetchAdminUserVehicles(id: string) {
+  return apiFetch<{ vehicles: OwnerVehicleOption[]; selectedVehicleIds: string[] }>(`/api/admin/users/${encodeURIComponent(id)}/vehicles`);
 }
 
 export function deleteAdminUser(id: string) {

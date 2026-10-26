@@ -38,7 +38,7 @@ const ITEM_HEIGHT = 82;
 export default function VehiclesScreen() {
   const { t } = useI18n();
   const { user } = useAuth();
-  const { fleetId, isDriver, isSupervisor, isAdmin } = useRole();
+  const { fleetId, isDriver, isSupervisor, isAdmin, isVehicleOwner } = useRole();
   const [vehicles, setVehicles] = useState<VehicleWithStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -64,7 +64,9 @@ export default function VehiclesScreen() {
       let fetched: VehicleWithStatus[];
       const companyScope = user?.companyId;
 
-      if (reset && companyScope && !debouncedSearch.trim()) {
+      // Owner grants can be revoked at any time. The existing company/fleet
+      // offline cache is intentionally never used for per-user owner access.
+      if (reset && companyScope && !isVehicleOwner && !debouncedSearch.trim()) {
         const cached = await getCachedVehicles(
           companyScope,
           isAdmin ? undefined : fleetId
@@ -85,25 +87,26 @@ export default function VehiclesScreen() {
 
       try {
         const params = new URLSearchParams();
-        if (!isAdmin && fleetId) params.set('fleetId', fleetId);
+        if (!isAdmin && !isVehicleOwner && fleetId) params.set('fleetId', fleetId);
         if (debouncedSearch.trim()) params.set('search', debouncedSearch.trim());
         params.set('limit', String(PAGE_LIMIT));
         params.set('offset', String(currentOffset));
         const data = await apiFetch(`/api/vehicles?${params.toString()}`);
         if (myFetchId !== fetchIdRef.current) return; // stale response
         fetched = data.vehicles || data;
-        if (companyScope && !debouncedSearch.trim()) {
+        if (companyScope && !isVehicleOwner && !debouncedSearch.trim()) {
           void cacheVehicles(companyScope, fetched);
         }
         setTotal(data.total ?? fetched.length);
       } catch {
         if (myFetchId !== fetchIdRef.current) return;
         if (!reset) { setLoadingMore(false); return; }
-        const cached = companyScope
+        const cached = companyScope && !isVehicleOwner
           ? await getCachedVehicles(companyScope, isAdmin ? undefined : fleetId)
           : [];
         fetched = cached as VehicleWithStatus[];
         setTotal(fetched.length);
+        if (isVehicleOwner) setError(t('general.error'));
       }
 
       if (myFetchId !== fetchIdRef.current) return;
@@ -132,21 +135,21 @@ export default function VehiclesScreen() {
         setLoadingMore(false);
       }
     }
-  }, [debouncedSearch, fleetId, isAdmin, isOnline, t, user?.companyId]);
+  }, [debouncedSearch, fleetId, isAdmin, isVehicleOwner, isOnline, t, user?.companyId, user?.id]);
 
   useFocusEffect(
     useCallback(() => {
       const hasExistingRows = offsetRef.current > 0;
       const isSearching = debouncedSearch.trim().length > 0;
       setLoading(isSearching || !hasExistingRows);
-      if (isSearching) setVehicles([]);
+      if (isSearching || isVehicleOwner) setVehicles([]);
       offsetRef.current = 0;
       setHasMore(true);
       fetchVehicles(true);
       return () => {
         fetchIdRef.current += 1;
       };
-    }, [debouncedSearch, fetchVehicles])
+    }, [debouncedSearch, fetchVehicles, isVehicleOwner])
   );
 
   const onRefresh = () => {
@@ -249,7 +252,7 @@ export default function VehiclesScreen() {
               style={[styles.card, bothDone && !isDriver && !isSupervisor && !isFail && styles.cardDone]}
               activeOpacity={0.6}
               onPress={() => {
-                router.push(`/(app)/vehicles/${item.id}/inspect`);
+                router.push(isVehicleOwner ? `/(app)/vehicles/${item.id}` : `/(app)/vehicles/${item.id}/inspect`);
               }}
             >
               <View style={[styles.accent, { backgroundColor: accentColor }]} />
@@ -262,6 +265,7 @@ export default function VehiclesScreen() {
                 <Text style={styles.meta}>
                   {vehicleTypeLabel(item.vehicle_type)}
                   {' \u2022 '}{item.fleet_id}
+                  {isVehicleOwner && item.is_active === false ? ` \u2022 ${t('owner.inactiveVehicle')}` : ''}
                   {item.daily_checked_by ? ` \u2022 ${item.daily_checked_by}` : ''}
                 </Text>
                 <Text style={styles.statusLabel}>

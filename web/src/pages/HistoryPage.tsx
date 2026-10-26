@@ -153,7 +153,8 @@ export function HistoryPage() {
   const queryGeneration = useRef(0);
   const HISTORY_PAGE_SIZE = 50;
 
-  const fleetScope = user?.role === 'admin' ? searchParams.get('fleetId') || undefined : user?.fleetId;
+  const fleetScope = user?.role === 'admin' || user?.role === 'vehicle_owner'
+    ? searchParams.get('fleetId') || undefined : user?.fleetId;
 
   useEffect(() => {
     let cancelled = false;

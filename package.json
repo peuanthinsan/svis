@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "migrate:020": "node scripts/migrate-020.js",
     "migrate:023": "node scripts/migrate-023.js",
+    "migrate:025": "node scripts/migrate-025.js",
     "migrate:021": "node scripts/migrate-021.js",
     "build:dashboard": "cd web && npm install && npm run build",
     "dev:dashboard": "cd web && npm install && npm run dev"

@@ -10,7 +10,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (!user) return res.status(401).json({ error: 'Unauthorized' });
 
   const { firstName, lastName } = req.body;
-  if (!isNonEmptyString(firstName, 100) || !isNonEmptyString(lastName, 100)) {
+  const validLastName = user.role === 'vehicle_owner'
+    ? typeof lastName === 'string' && lastName.trim().length <= 100
+    : isNonEmptyString(lastName, 100);
+  if (!isNonEmptyString(firstName, 100) || !validLastName) {
     return res.status(400).json({ error: 'First name and last name required' });
   }
 

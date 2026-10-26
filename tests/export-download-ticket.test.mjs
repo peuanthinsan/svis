@@ -36,11 +36,18 @@ const branding = await loadModule('../branding.ts');
 const types = await loadModule('../lib/types.ts');
 // api-auth captures JWT_SECRET at module load; isolate that dependency without
 // leaving a changed environment for any other tests in this process.
-const previousSecret = process.env.JWT_SECRET;
-process.env.JWT_SECRET = SECRET;
-const auth = await loadModule('../lib/api-auth.ts');
-if (previousSecret === undefined) delete process.env.JWT_SECRET;
-else process.env.JWT_SECRET = previousSecret;
+async function loadAuth(db) {
+  const previousSecret = process.env.JWT_SECRET;
+  process.env.JWT_SECRET = SECRET;
+  try {
+    return await loadModule('../lib/api-auth.ts', { '@neondatabase/serverless': { neon: () => db.sql } });
+  } finally {
+    if (previousSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = previousSecret;
+  }
+}
+const auth = await loadAuth(mockDatabase());
+const vehicleAccess = await loadModule('../lib/vehicle-access.ts');
 
 const bearer = (user = admin) => `Bearer ${jwt.sign(user, SECRET, { expiresIn: '5m' })}`;
 const expectStatus = (status) => (error) => error instanceof tickets.ExportRequestError && error.status === status;
@@ -48,13 +55,22 @@ const expectStatus = (status) => (error) => error instanceof tickets.ExportReque
 // This is an adapter mock, not PostgreSQL. It checks which scopes/operations the
 // real helpers and handlers issue; SQL locking/transaction semantics require the
 // separate isolated PostgreSQL validation and the production deployment gate.
-function mockDatabase({ ownerExists = true, rejectInsert = false } = {}) {
+function mockDatabase({ ownerExists = true, rejectInsert = false, currentUser = admin, vehicleIds = [] } = {}) {
   const records = new Map();
   const queries = [];
+  const authQueries = [];
+  const state = { currentUser, vehicleIds };
   let transactions = 0;
   function execute(text, values = []) {
+    if (/FROM users u JOIN companies c/.test(text)) {
+      authQueries.push({ text, values });
+      if (!ownerExists || !state.currentUser || values[0] !== state.currentUser.userId
+        || values[1] !== state.currentUser.companyId) return [];
+      const u = state.currentUser;
+      return [{ id: u.userId, username: u.username, role: u.role, fleet_id: u.fleetId,
+        company_id: u.companyId, company_slug: u.companySlug, company_name: u.companyName }];
+    }
     queries.push({ text, values });
-    if (text === 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED') return [];
     if (/^SELECT id FROM users/.test(text)) return ownerExists ? [{ id: USER_ID }] : [];
     if (/^DELETE FROM export_download_tickets\s+WHERE user_id/.test(text)) {
       for (const [hash, row] of records) {
@@ -65,35 +81,40 @@ function mockDatabase({ ownerExists = true, rejectInsert = false } = {}) {
     }
     if (/^INSERT INTO export_download_tickets/.test(text)) {
       if (!ownerExists || rejectInsert) return [];
-      const [hash, userId, companyId, fleets, start, end, expiresAt] = values;
+      const [hash, userId, companyId, fleets, start, end, expiresAt, vehicleIds] = values;
       records.set(hash, {
         user_id: userId, company_id: companyId, fleet_ids: [...fleets],
-        date_start: start, date_end: end, expires_at: Date.parse(expiresAt),
+        date_start: start, date_end: end, expires_at: Date.parse(expiresAt), vehicle_ids: vehicleIds,
       });
       return [{ token_hash: hash }];
     }
-    if (/^DELETE FROM export_download_tickets\s+WHERE token_hash/.test(text)) {
-      assert.match(text, /RETURNING user_id::text AS user_id, company_id::text AS company_id/);
+    if (/^DELETE FROM export_download_tickets t/.test(text)) {
+      assert.match(text, /RETURNING t.user_id::text AS user_id, t.company_id::text AS company_id/);
+      assert.match(text, /u.is_active/);
+      assert.match(text, /c.is_active/);
       const row = records.get(values[0]);
-      if (!row || row.expires_at <= Date.now()) return [];
+      if (!row || row.expires_at <= Date.now() || !state.currentUser) return [];
       records.delete(values[0]);
-      return [row];
+      return [{ ...row, current_role: state.currentUser.role, current_fleet_id: state.currentUser.fleetId }];
     }
+    if (/FROM user_vehicle_access/.test(text)) return state.vehicleIds.map((vehicle_id) => ({ vehicle_id }));
     if (/FROM inspection_logs il|FROM vehicle_master/.test(text)) return [];
     throw new Error(`Unexpected SQL in export test: ${text}`);
   }
-  const sql = {
+  const sql = (strings, ...values) => sql.query(strings.reduce((query, part, i) => query + (i ? `$${i}` : '') + part, ''), values);
+  Object.assign(sql, {
     query(text, values = []) {
       return { text, values, then(resolve, reject) {
         return Promise.resolve().then(() => execute(text, values)).then(resolve, reject);
       } };
     },
-    async transaction(items) {
+    async transaction(items, options) {
       transactions += 1;
+      assert.deepEqual(options, { isolationLevel: 'ReadCommitted' });
       return items.map((item) => execute(item.text, item.values));
     },
-  };
-  return { sql, records, queries, get transactions() { return transactions; } };
+  });
+  return { sql, records, queries, authQueries, state, get transactions() { return transactions; } };
 }
 
 function response() {
@@ -111,7 +132,8 @@ function response() {
 async function handlers(db) {
   const imports = {
     '@neondatabase/serverless': { neon: () => db.sql },
-    '../../lib/api-auth': auth,
+    '../../lib/api-auth': await loadAuth(db),
+    '../../lib/vehicle-access': vehicleAccess,
     '../../lib/export-download-ticket': tickets,
     '../../lib/export-http': http,
     '../../branding': branding,
@@ -184,12 +206,11 @@ test('issuance stores only hash and immutable scope, and handles missing owner o
   const token = url.searchParams.get('downloadTicket');
   const hash = tickets.verifyExportTicket(token, SECRET);
   assert.equal(db.transactions, 1);
-  assert.equal(db.queries[0].text, 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
-  assert.match(db.queries[1].text, /company_id = \$2::uuid FOR UPDATE/);
+  assert.match(db.queries[0].text, /company_id = \$2::uuid FOR UPDATE/);
   assert.equal(db.records.get(hash).company_id, COMPANY_ID);
   assert.deepEqual(db.records.get(hash).fleet_ids, ['CXM']);
   assert.ok(!JSON.stringify(db.queries).includes(token));
-  assert.equal(db.queries[3].values.at(-1), tickets.MAX_OUTSTANDING_EXPORT_TICKETS);
+  assert.equal(db.queries[2].values.at(-1), tickets.MAX_OUTSTANDING_EXPORT_TICKETS);
   await assert.rejects(tickets.issueExportTicket(mockDatabase({ rejectInsert: true }).sql, scope, SECRET), expectStatus(429));
   await assert.rejects(tickets.issueExportTicket(mockDatabase({ ownerExists: false }).sql, scope, SECRET), expectStatus(401));
 });
@@ -234,16 +255,17 @@ test('methods and CORS errors do not authenticate or consume a download ticket',
   }
 });
 
-test('ticket endpoint rejects unauthenticated, invalid and unassigned requests without SQL', async () => {
+test('ticket endpoint rejects unauthenticated, invalid and unassigned requests without capability or report queries', async () => {
   const db = mockDatabase();
   const api = await handlers(db);
   const cases = [
     [{}, {}, 401],
     [{ authorization: bearer(), 'content-type': 'text/plain' }, {}, 415],
     [{ authorization: bearer(), 'content-type': 'application/json' }, { dateStart: '2026-02-30' }, 400],
-    [{ authorization: bearer({ ...admin, role: 'supervisor' }), 'content-type': 'application/json' }, {}, 403],
+    [{ authorization: bearer({ ...admin, role: 'supervisor' }), 'content-type': 'application/json' }, {}, 403, { ...admin, role: 'supervisor' }],
   ];
-  for (const [headers, body, status] of cases) {
+  for (const [headers, body, status, currentUser = admin] of cases) {
+    db.state.currentUser = currentUser;
     const res = response();
     await api.issue({ method: 'POST', headers: { ...headers, origin: 'https://svis.songdeegps.com' }, body, query: {} }, res);
     assert.equal(res.statusCode, status);
@@ -302,6 +324,7 @@ test('existing bearer export still creates the workbook and fails closed for a m
   assert.equal(db.transactions, 0);
   const denied = response();
   const queryCount = db.queries.length;
+  db.state.currentUser = { ...admin, role: 'supervisor' };
   await api.download({ method: 'GET', headers: { authorization: bearer({ ...admin, role: 'supervisor' }) }, query: {} }, denied);
   assert.equal(denied.statusCode, 403);
   assert.equal(db.queries.length, queryCount);
@@ -322,4 +345,75 @@ test('failure logs contain bounded codes rather than credentials or database err
     { event: 'dashboard_export_failed', code: 'UNKNOWN' },
   ]);
   assert.ok(!messages.join('').includes(SECRET));
+});
+
+const VEHICLE_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const VEHICLE_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const VEHICLE_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const owner = { ...admin, role: 'vehicle_owner', fleetId: '' };
+
+test('owner report links snapshot vehicle grants and revocation removes access without adding later grants', async () => {
+  const db = mockDatabase({ currentUser: owner, vehicleIds: [VEHICLE_A, VEHICLE_B] });
+  const api = await handlers(db);
+  const issued = response();
+  await api.issue({ method: 'POST', headers: { authorization: bearer(owner), 'content-type': 'application/json' },
+    body: { fleetId: 'FLEET-A,FLEET-B' }, query: {} }, issued);
+  assert.equal(issued.statusCode, 200);
+  assert.deepEqual([...db.records.values()][0].vehicle_ids, [VEHICLE_A, VEHICLE_B]);
+  db.state.vehicleIds = [VEHICLE_B, VEHICLE_C];
+  const token = new URL(issued.body.downloadUrl, 'https://svis.songdeegps.com').searchParams.get('downloadTicket');
+  const downloaded = response();
+  await api.download({ method: 'GET', headers: {}, query: { downloadTicket: token, _sm_nck: '1', vehicleIds: VEHICLE_C } }, downloaded);
+  assert.equal(downloaded.statusCode, 200);
+  const reports = db.queries.filter(({ text }) => /FROM inspection_logs il|FROM vehicle_master/.test(text));
+  assert.equal(reports.length, 4);
+  for (const query of reports) {
+    assert.match(query.text, /(?:il\.vehicle_id|\bid) = ANY\(\$\d+::uuid\[\]\)/);
+    assert.deepEqual(query.values.find(Array.isArray), [VEHICLE_B]);
+    assert.equal(query.values[0], COMPANY_ID);
+    if (/FROM inspection_logs il/.test(query.text)) {
+      assert.match(query.text, /vm\.fleet_id AS fleet_id/);
+      assert.match(query.text, /vm\.fleet_id IN/);
+      assert.doesNotMatch(query.text, /AND il\.fleet_id IN/);
+    }
+  }
+  assert.equal(db.records.size, 0);
+});
+
+test('owner exports with no grants carry an explicit empty UUID array, never all company vehicles', async () => {
+  const db = mockDatabase({ currentUser: owner });
+  const api = await handlers(db);
+  assert.deepEqual(tickets.resolveExportScope(owner, {}).vehicleIds, []);
+  const res = response();
+  await api.download({ method: 'GET', headers: { authorization: bearer(owner) }, query: {} }, res);
+  assert.equal(res.statusCode, 200);
+  const reports = db.queries.filter(({ text }) => /FROM inspection_logs il|FROM vehicle_master/.test(text));
+  assert.equal(reports.length, 4);
+  assert.ok(reports.every((query) => Array.isArray(query.values[1]) && query.values[1].length === 0));
+});
+
+test('stored role and active account govern old session tokens and outstanding capabilities', async () => {
+  const db = mockDatabase({ currentUser: admin });
+  const scope = tickets.resolveExportScope(admin, {});
+  const issued = await tickets.issueExportTicket(db.sql, scope, SECRET);
+  const token = new URL(issued.downloadUrl, 'https://svis.songdeegps.com').searchParams.get('downloadTicket');
+  db.state.currentUser = owner;
+  db.state.vehicleIds = [VEHICLE_B];
+  assert.deepEqual((await tickets.redeemExportTicket(db.sql, token, SECRET)).vehicleIds, [VEHICLE_B]);
+  const currentAuth = await loadAuth(db);
+  const oldAdminToken = bearer(admin);
+  assert.equal((await currentAuth.verifyAuth({ headers: { authorization: oldAdminToken } })).role, 'vehicle_owner');
+  const deniedTicket = await tickets.issueExportTicket(db.sql, scope, SECRET);
+  db.state.currentUser = null;
+  assert.equal(await currentAuth.verifyAuth({ headers: { authorization: oldAdminToken } }), null);
+  const deniedToken = new URL(deniedTicket.downloadUrl, 'https://svis.songdeegps.com').searchParams.get('downloadTicket');
+  await assert.rejects(tickets.redeemExportTicket(db.sql, deniedToken, SECRET), expectStatus(410));
+});
+
+test('changing a fleet after ticket issuance cannot expand the original export scope', async () => {
+  const db = mockDatabase({ currentUser: { ...admin, role: 'supervisor', fleetId: 'A' } });
+  const issued = await tickets.issueExportTicket(db.sql, tickets.resolveExportScope(db.state.currentUser, {}), SECRET);
+  db.state.currentUser = { ...admin, role: 'supervisor', fleetId: 'B' };
+  const token = new URL(issued.downloadUrl, 'https://svis.songdeegps.com').searchParams.get('downloadTicket');
+  await assert.rejects(tickets.redeemExportTicket(db.sql, token, SECRET), expectStatus(410));
 });
