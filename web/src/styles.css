@@ -429,7 +429,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .defect-row { display: flex; justify-content: space-between; gap: 12px; align-items: center; font-size: 12px; padding: 8px 0; border-top: 1px solid var(--border); }
 .defect-row__actions { display: flex; gap: 6px; align-items: center; }
 
-.status-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+.status-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
 .status-summary__item {
   min-width: 0; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border);
   border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 10px;
@@ -755,7 +755,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .header-actions .fleet-select { flex: 1; min-width: 0; }
   .attention-grid { grid-template-columns: 1fr; }
   .maintenance-grid { grid-template-columns: 1fr; }
-  .status-summary { grid-template-columns: 1fr 1fr 1fr; }
+  .status-summary { grid-template-columns: 1fr 1fr; }
   .stats { grid-template-columns: repeat(3, 1fr); }
   .stats div { padding: 12px; }
   .stats strong { font-size: 21px; }

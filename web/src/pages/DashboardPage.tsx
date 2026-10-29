@@ -25,11 +25,13 @@ const GPS_COLOR: Record<string, string> = {
   running: '#22c55e',
   stopped: '#f59e0b',
   offline: '#94a3b8',
+  uninstall: '#64748b',
 };
 
 function gpsLabel(status: string) {
   if (status === 'running') return t('unitStatusRunning');
   if (status === 'stopped') return t('unitStatusStopped');
+  if (status === 'uninstall') return t('unitStatusUninstall');
   return t('unitStatusOffline');
 }
 
@@ -82,6 +84,7 @@ function UnitStatusSection({ unitData }: { unitData: UnitStatusData }) {
             { label: t('unitStatusRunning'), value: summary.running, color: '#22c55e' },
             { label: t('unitStatusStopped'), value: summary.stopped, color: '#f59e0b' },
             { label: t('unitStatusOffline'), value: summary.offline, color: '#94a3b8' },
+            { label: t('unitStatusUninstall'), value: summary.uninstall ?? 0, color: '#64748b' },
           ] as const).map(s => (
             <div key={s.label} className="status-summary__item">
               <span><i className="status-summary__dot" style={{ backgroundColor: s.color }} aria-hidden="true" /> {s.label}</span>

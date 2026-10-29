@@ -15,13 +15,13 @@ type UnitRow = {
   plateNumber: string;
   fleet: string;
   driverName: string;
-  gpsStatus: GpsStatus;
+  gpsStatus: GpsStatus | 'uninstall';
   ignition: boolean;
   speed: number;
   lastFixTime: string;
   updatedAt: string;
   inspections: InspectionFlags;
-  // Derived: GPS active but at least one due inspection (pre-route today,
+  // Derived: GPS active or uninstalled, but at least one due inspection (pre-route today,
   // post-route today, weekly this week) not yet submitted.
   needsAttention: boolean;
 };
@@ -105,10 +105,18 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       fleetVehicles.map((v: any) => [v.plate_number as string, v.fleet_id as string]),
     );
 
-    const scopedVehicles: UnitRow[] = sheetVehicles.flatMap((v) => {
-      const vehicleFleet = fleetByPlate.get(v.plateNumber);
-      if (!vehicleFleet) return [];
-      const isGpsActive = v.gpsStatus !== 'offline';
+    const sheetByPlate = new Map(sheetVehicles.map((v) => [v.plateNumber, v]));
+    const scopedVehicles: UnitRow[] = Array.from(fleetByPlate, ([plateNumber, vehicleFleet]) => {
+      const v = sheetByPlate.get(plateNumber) ?? {
+        plateNumber,
+        fleet: vehicleFleet,
+        driverName: '',
+        gpsStatus: 'uninstall' as const,
+        ignition: false,
+        speed: 0,
+        lastFixTime: '',
+        updatedAt: '',
+      };
       const inspections: InspectionFlags = {
         preRoute: preRoutePlates.has(v.plateNumber),
         postRoute: postRoutePlates.has(v.plateNumber),
@@ -119,7 +127,8 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         ...v,
         fleet: vehicleFleet,
         inspections,
-        needsAttention: isGpsActive && !allDone,
+        // Uninstalled vehicles still need checks even without GPS activity.
+        needsAttention: v.gpsStatus !== 'offline' && !allDone,
       };
     });
 
@@ -132,6 +141,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
         running: scopedVehicles.filter(v => v.gpsStatus === 'running').length,
         stopped: scopedVehicles.filter(v => v.gpsStatus === 'stopped').length,
         offline: scopedVehicles.filter(v => v.gpsStatus === 'offline').length,
+        uninstall: scopedVehicles.filter(v => v.gpsStatus === 'uninstall').length,
         needsAttention: scopedVehicles.filter(v => v.needsAttention).length,
       },
     });
