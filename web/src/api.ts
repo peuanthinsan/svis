@@ -363,7 +363,7 @@ export function uploadInspectionPhoto(file: File) {
   });
 }
 
-export type GpsStatus = 'running' | 'stopped' | 'offline';
+export type GpsStatus = 'running' | 'stopped' | 'offline' | 'uninstall';
 
 export type InspectionFlags = {
   preRoute: boolean;
@@ -393,6 +393,7 @@ export type UnitStatusData = {
     running: number;
     stopped: number;
     offline: number;
+    uninstall: number;
     needsAttention: number;
   };
 };

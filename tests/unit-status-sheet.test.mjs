@@ -203,14 +203,22 @@ const integrationCsv = csvFor([
   deviceRow('FOREIGN', 'Running', 'ON', MINUTE),
 ]);
 
-async function request(endpoint, user = admin, query = {}) {
+async function request(endpoint, user = admin, query = {}, options = {}) {
   const calls = [];
   const activityPlates = [];
-  const harness = sheetModule(integrationCsv);
+  const harness = sheetModule(options.csv ?? integrationCsv);
+  if (Object.hasOwn(options, 'sheetVehicles')) {
+    harness.sheet.fetchSheetVehicles = async () => options.sheetVehicles;
+  }
+  if (options.sheetError) {
+    harness.sheet.fetchSheetVehicles = async () => { throw new Error(options.sheetError); };
+  }
   const selectedFleet = user?.role === 'admin' ? query.fleetId || null : user?.fleetId || null;
-  const scoped = companyVehicles.filter((v) => v.company_id === user?.companyId &&
+  const scoped = (options.vehicles ?? companyVehicles).filter((v) => v.is_active !== false && v.company_id === user?.companyId &&
     (!selectedFleet || v.fleet_id === selectedFleet));
-  const inspected = scoped.filter((v) => ['complete', 'stale'].includes(v.id));
+  const inspections = options.inspections ?? {
+    complete: ['daily', 'post_route', 'weekly'], stale: ['daily', 'post_route', 'weekly'],
+  };
   const sql = async (strings, ...values) => {
     const text = strings.join('?').replace(/\s+/g, ' ').trim();
     calls.push({ text, values });
@@ -235,9 +243,11 @@ async function request(endpoint, user = admin, query = {}) {
       if (text.includes('GROUP BY v.fleet_id')) return [];
       const weekly = text.includes("i.frequency = 'weekly'");
       const byPlate = text.includes('SELECT DISTINCT v.plate_number');
-      return inspected.flatMap((v) => {
+      return scoped.flatMap((v) => {
         const ref = byPlate ? { plate_number: v.plate_number } : { vehicle_id: v.id, vehicle_type: v.vehicle_type };
-        return weekly ? [ref] : ['daily', 'post_route'].map((frequency) => ({ ...ref, frequency }));
+        const frequencies = inspections[v.id] ?? [];
+        return weekly ? (frequencies.includes('weekly') ? [ref] : []) :
+          frequencies.filter((frequency) => frequency !== 'weekly').map((frequency) => ({ ...ref, frequency }));
       });
     }
     if (text.includes('FROM vehicle_master')) {
@@ -272,7 +282,7 @@ test('dashboard and Unit Status share DHL counters, Active membership and needsA
   assert.equal(unit.res.statusCode, 200);
   const dashboardUnits = dashboard.res.body.unitStatus;
   assert.deepEqual(dashboardUnits, unit.res.body);
-  assert.deepEqual(dashboardUnits.summary, { total: 8, running: 2, stopped: 4, offline: 2, needsAttention: 5 });
+  assert.deepEqual(dashboardUnits.summary, { total: 8, running: 2, stopped: 4, offline: 2, uninstall: 0, needsAttention: 5 });
   assert.equal(dashboard.res.body.active.checked, 6);
   assert.equal(dashboard.res.body.active.total, 8);
   assert.equal(dashboard.res.body.preDeparture.checked, 1, 'completed offline units must not enter Active completion');
@@ -301,7 +311,7 @@ test('admin selection and a supervisor JWT fleet constrain both endpoints using 
     assert.equal(dashboard.res.statusCode, 200);
     assert.equal(unit.res.statusCode, 200);
     assert.deepEqual(dashboard.res.body.unitStatus, unit.res.body);
-    assert.deepEqual(unit.res.body.summary, { total: 7, running: 2, stopped: 3, offline: 2, needsAttention: 4 });
+    assert.deepEqual(unit.res.body.summary, { total: 7, running: 2, stopped: 3, offline: 2, uninstall: 0, needsAttention: 4 });
     assert.equal(dashboard.res.body.fleetId, 'fleet-alpha');
     assert.equal(dashboard.res.body.active.checked, 5);
     assert.equal(dashboard.res.body.active.total, 7);
@@ -318,7 +328,7 @@ test('both handlers preserve legacy classification when the JWT belongs to anoth
   assert.equal(dashboard.res.statusCode, 200);
   assert.equal(unit.res.statusCode, 200);
   assert.deepEqual(dashboard.res.body.unitStatus, unit.res.body);
-  assert.deepEqual(unit.res.body.summary, { total: 8, running: 3, stopped: 3, offline: 2, needsAttention: 4 });
+  assert.deepEqual(unit.res.body.summary, { total: 8, running: 3, stopped: 3, offline: 2, uninstall: 0, needsAttention: 4 });
   assert.equal(dashboard.res.body.active.checked, 6);
   const byPlate = new Map(unit.res.body.vehicles.map((v) => [v.plateNumber, v.gpsStatus]));
   assert.equal(byPlate.get('STALE'), 'stopped');
@@ -333,5 +343,103 @@ test('missing supervisor fleet fails closed in both endpoints before any SQL or 
     assert.equal(result.res.statusCode, 403);
     assert.deepEqual(result.calls, []);
     assert.deepEqual(result.downloads, []);
+  }
+});
+
+const uninstalledVehicles = [
+  { id: 'uninstalled-pending', plate_number: 'NO-UNIT-PENDING', fleet_id: 'fleet-alpha' },
+  { id: 'uninstalled-partial', plate_number: 'NO-UNIT-PARTIAL', fleet_id: 'fleet-alpha' },
+  { id: 'uninstalled-complete', plate_number: 'NO-UNIT-COMPLETE', fleet_id: 'fleet-beta' },
+].map((v) => ({ ...v, company_id: admin.companyId, vehicle_type: 'car' }));
+const uninstallOptions = {
+  vehicles: [...companyVehicles, ...uninstalledVehicles, foreignVehicle,
+    { ...uninstalledVehicles[0], id: 'inactive', plate_number: 'INACTIVE', is_active: false }],
+  inspections: {
+    complete: ['daily', 'post_route', 'weekly'], stale: ['daily', 'post_route', 'weekly'],
+    'uninstalled-partial': ['post_route', 'weekly'],
+    'uninstalled-complete': ['daily', 'post_route', 'weekly'],
+  },
+};
+
+test('registered vehicles absent from the sheet show Uninstall and independent inspection flags in both APIs', async () => {
+  const dashboard = await request('dashboard', admin, {}, uninstallOptions);
+  const unit = await request('unit-status', admin, {}, uninstallOptions);
+  assert.equal(dashboard.res.statusCode, 200);
+  assert.equal(unit.res.statusCode, 200);
+  assert.deepEqual(dashboard.res.body.unitStatus, unit.res.body);
+  const rows = new Map(unit.res.body.vehicles.map((v) => [v.plateNumber, v]));
+  for (const [plate, inspections, needsAttention] of [
+    ['NO-UNIT-PENDING', { preRoute: false, postRoute: false, weekly: false }, true],
+    ['NO-UNIT-PARTIAL', { preRoute: false, postRoute: true, weekly: true }, true],
+    ['NO-UNIT-COMPLETE', { preRoute: true, postRoute: true, weekly: true }, false],
+  ]) {
+    const row = rows.get(plate);
+    assert.equal(row.gpsStatus, 'uninstall');
+    assert.deepEqual(row.inspections, inspections);
+    assert.equal(row.needsAttention, needsAttention);
+    assert.equal(row.lastFixTime, '');
+    assert.equal(row.updatedAt, '');
+  }
+  assert.equal(rows.get('MISSING').gpsStatus, 'offline', 'a present row with a missing timestamp is still installed');
+  assert.equal(rows.has('FOREIGN'), false);
+  assert.equal(rows.has('INACTIVE'), false);
+  assert.deepEqual(unit.res.body.summary, { total: 11, running: 2, stopped: 4, offline: 2, uninstall: 3, needsAttention: 7 });
+  assert.equal(dashboard.res.body.totalVehicles, 11);
+  assert.equal(dashboard.res.body.active.checked, 6);
+  assert.equal(dashboard.res.body.preDeparture.checked, 1);
+  assert.equal(dashboard.res.body.preDeparture.total, 6);
+  assert.equal(dashboard.res.body.postRoute.checked, 1);
+  assert.equal(dashboard.res.body.weekly.checked, 1);
+  for (const result of [dashboard, unit]) {
+    assert.equal(result.downloads.length, 1);
+    assert.ok(result.activityPlates.every((plate) => !plate.startsWith('NO-UNIT')));
+  }
+});
+
+test('uninstalled rows respect database fleet and company scope for admins and supervisors', async () => {
+  const supervisor = { ...admin, role: 'supervisor', fleetId: 'fleet-alpha' };
+  for (const [user, query] of [[admin, { fleetId: 'fleet-alpha' }], [supervisor, { fleetId: 'fleet-beta' }]]) {
+    const dashboard = await request('dashboard', user, query, uninstallOptions);
+    const unit = await request('unit-status', user, query, uninstallOptions);
+    assert.equal(dashboard.res.statusCode, 200);
+    assert.equal(unit.res.statusCode, 200);
+    assert.deepEqual(dashboard.res.body.unitStatus, unit.res.body);
+    assert.equal(unit.res.body.summary.uninstall, 2);
+    assert.ok(unit.res.body.vehicles.every((v) => v.fleet === 'fleet-alpha'));
+    assert.ok(unit.res.body.vehicles.every((v) => !['NO-UNIT-COMPLETE', 'FOREIGN', 'INACTIVE'].includes(v.plateNumber)));
+  }
+});
+
+test('a configured empty sheet labels all scoped registered vehicles Uninstall without GPS activity', async () => {
+  const options = { ...uninstallOptions, csv: csvFor([]) };
+  const dashboard = await request('dashboard', admin, {}, options);
+  const unit = await request('unit-status', admin, {}, options);
+  assert.equal(dashboard.res.statusCode, 200);
+  assert.equal(unit.res.statusCode, 200);
+  assert.deepEqual(dashboard.res.body.unitStatus, unit.res.body);
+  assert.equal(unit.res.body.summary.total, 11);
+  assert.equal(unit.res.body.summary.uninstall, 11);
+  assert.ok(unit.res.body.vehicles.every((v) => v.gpsStatus === 'uninstall'));
+  assert.equal(dashboard.res.body.active.checked, 0);
+  assert.equal(dashboard.res.body.preDeparture.total, 0);
+  assert.deepEqual(dashboard.activityPlates, []);
+  assert.deepEqual(unit.activityPlates, []);
+});
+
+test('unconfigured or failed sheets never classify vehicles as Uninstall', async () => {
+  for (const endpoint of ['dashboard', 'unit-status']) {
+    const unconfigured = await request(endpoint, admin, {}, { ...uninstallOptions, sheetVehicles: null });
+    assert.equal(unconfigured.res.statusCode, 200);
+    const status = endpoint === 'dashboard' ? unconfigured.res.body.unitStatus : unconfigured.res.body;
+    assert.deepEqual(status, { configured: false, vehicles: [] });
+    const failed = await request(endpoint, admin, {}, { ...uninstallOptions, sheetError: 'Synthetic sheet failure' });
+    if (endpoint === 'dashboard') {
+      assert.equal(failed.res.statusCode, 200);
+      assert.equal(failed.res.body.unitStatus, null);
+    } else {
+      assert.equal(failed.res.statusCode, 500);
+      assert.deepEqual(failed.res.body, { error: 'Internal server error' });
+    }
+    assert.deepEqual(failed.activityPlates, []);
   }
 });

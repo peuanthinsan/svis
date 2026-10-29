@@ -242,23 +242,34 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     const dailyIds = new Set(dailyRefs.map((r) => r.vehicle_id));
     const postRouteIds = new Set(postRouteRefs.map((r) => r.vehicle_id));
     const weeklyIds = new Set(weeklyRefs.map((r) => r.vehicle_id));
-    const unitVehicles = sheetVehicles?.flatMap((v) => {
-      const ref = vehicleByPlate.get(v.plateNumber);
-      if (!ref) return [];
+    // Registered vehicles remain visible even without an installed Songdee unit.
+    // Only a successful sheet snapshot can establish that a plate is absent.
+    const sheetByPlate = new Map(sheetVehicles?.map((v) => [v.plateNumber, v]));
+    const unitVehicles = sheetVehicles === null ? [] : Array.from(vehicleByPlate, ([plateNumber, ref]) => {
+      const v = sheetByPlate.get(plateNumber) ?? {
+        plateNumber,
+        fleet: ref.fleet_id,
+        driverName: '',
+        gpsStatus: 'uninstall' as const,
+        ignition: false,
+        speed: 0,
+        lastFixTime: '',
+        updatedAt: '',
+      };
       const inspections = {
         preRoute: dailyIds.has(ref.vehicle_id),
         postRoute: postRouteIds.has(ref.vehicle_id),
         weekly: weeklyIds.has(ref.vehicle_id),
       };
-      const isGpsActive = v.gpsStatus !== 'offline';
-      return [{
+      return {
         ...v,
         fleet: ref.fleet_id,
         inspections,
-        needsAttention: isGpsActive &&
+        // Uninstalled vehicles still need checks even without GPS activity.
+        needsAttention: v.gpsStatus !== 'offline' &&
           !(inspections.preRoute && inspections.postRoute && inspections.weekly),
-      }];
-    }) ?? [];
+      };
+    });
     const unitStatus = sheetVehicles === null
       ? telematicsUnavailable
         ? null
@@ -272,6 +283,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             running: unitVehicles.filter((v) => v.gpsStatus === 'running').length,
             stopped: unitVehicles.filter((v) => v.gpsStatus === 'stopped').length,
             offline: unitVehicles.filter((v) => v.gpsStatus === 'offline').length,
+            uninstall: unitVehicles.filter((v) => v.gpsStatus === 'uninstall').length,
             needsAttention: unitVehicles.filter((v) => v.needsAttention).length,
           },
         };
